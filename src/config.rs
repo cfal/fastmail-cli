@@ -44,9 +44,13 @@ impl Config {
             return Ok(Self::default());
         }
         let content = fs::read_to_string(&path)?;
-        let config: Config = toml::from_str(&content)
-            .map_err(|e| Error::Config(format!("Failed to parse config: {}", e)))?;
-        Ok(config)
+        Self::parse(&content)
+    }
+
+    fn parse(content: &str) -> Result<Self> {
+        toml::from_str(content).map_err(|_| {
+            Error::Config("Invalid config.toml: check TOML syntax and field types.".into())
+        })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -170,6 +174,17 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert!(config.core.api_token.is_none());
+    }
+
+    #[test]
+    fn config_parse_errors_do_not_echo_credentials() {
+        for content in [
+            "[core]\napi_token = \"secret-token\" trailing",
+            "core = \"secret-token\"",
+        ] {
+            let error = Config::parse(content).unwrap_err().to_string();
+            assert!(!error.contains("secret-token"));
+        }
     }
 
     #[test]

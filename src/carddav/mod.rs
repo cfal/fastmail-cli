@@ -86,10 +86,34 @@ pub struct CardDavClient {
 impl CardDavClient {
     pub fn new(username: String, app_password: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("Failed to build CardDAV client"),
             username,
             app_password,
         }
+    }
+
+    fn resource_url(&self, href: &str) -> Result<reqwest::Url> {
+        let base = reqwest::Url::parse(CARDDAV_BASE).unwrap();
+        if !href.starts_with('/') && !href.starts_with("https://") {
+            return Err(Error::Server("Invalid CardDAV resource URL".into()));
+        }
+        let url = base
+            .join(href)
+            .map_err(|_| Error::Server("Invalid CardDAV resource URL".into()))?;
+        if url.origin() != base.origin()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(Error::Server(
+                "CardDAV resource must stay on the server origin".into(),
+            ));
+        }
+        Ok(url)
     }
 
     /// Discover address books for the user
@@ -117,7 +141,7 @@ impl CardDavClient {
             .await?;
 
         let status = response.status();
-        let text: String = response.text().await?;
+        let text = read_response(response).await?;
 
         debug!(status = %status, "PROPFIND response");
 
@@ -184,7 +208,7 @@ impl CardDavClient {
     /// List all contacts in an address book
     #[instrument(skip(self))]
     pub async fn list_contacts(&self, addressbook_href: &str) -> Result<Vec<Contact>> {
-        let url = format!("{}{}", CARDDAV_BASE, addressbook_href);
+        let url = self.resource_url(addressbook_href)?;
 
         let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -196,7 +220,7 @@ impl CardDavClient {
 
         let response = self
             .client
-            .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), &url)
+            .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), url)
             .basic_auth(&self.username, Some(&self.app_password))
             .header("Content-Type", "application/xml")
             .header("Depth", "1")
@@ -205,7 +229,7 @@ impl CardDavClient {
             .await?;
 
         let status = response.status();
-        let text: String = response.text().await?;
+        let text = read_response(response).await?;
 
         debug!(status = %status, "REPORT response");
 
@@ -289,7 +313,7 @@ impl CardDavClient {
         let addressbooks = self.list_addressbooks().await?;
 
         for ab in addressbooks {
-            let url = format!("{}{}", CARDDAV_BASE, ab.href);
+            let url = self.resource_url(&ab.href)?;
 
             let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -301,7 +325,7 @@ impl CardDavClient {
 
             let response = self
                 .client
-                .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), &url)
+                .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), url)
                 .basic_auth(&self.username, Some(&self.app_password))
                 .header("Content-Type", "application/xml")
                 .header("Depth", "1")
@@ -310,7 +334,7 @@ impl CardDavClient {
                 .await?;
 
             let status = response.status();
-            let text: String = response.text().await?;
+            let text = read_response(response).await?;
 
             if !status.is_success() && status.as_u16() != 207 {
                 continue;
@@ -375,12 +399,12 @@ impl CardDavClient {
             fields.notes,
         );
 
-        let url = format!("{}{}{}.vcf", CARDDAV_BASE, ab_href, uid);
+        let url = self.resource_url(&format!("{ab_href}{uid}.vcf"))?;
         debug!(url = %url, "Creating contact");
 
         let response = self
             .client
-            .put(&url)
+            .put(url)
             .basic_auth(&self.username, Some(&self.app_password))
             .header("Content-Type", "text/vcard; charset=utf-8")
             .header("If-None-Match", "*")
@@ -389,7 +413,7 @@ impl CardDavClient {
             .await?;
 
         let status = response.status();
-        let text: String = response.text().await?;
+        let text = read_response(response).await?;
 
         if !status.is_success() && status.as_u16() != 201 && status.as_u16() != 204 {
             return Err(Error::Server(format!(
@@ -457,12 +481,12 @@ impl CardDavClient {
             final_notes,
         );
 
-        let url = format!("{}{}", CARDDAV_BASE, href);
+        let url = self.resource_url(&href)?;
         debug!(url = %url, "Updating contact");
 
         let response = self
             .client
-            .put(&url)
+            .put(url)
             .basic_auth(&self.username, Some(&self.app_password))
             .header("Content-Type", "text/vcard; charset=utf-8")
             .body(vcard)
@@ -470,7 +494,7 @@ impl CardDavClient {
             .await?;
 
         let status = response.status();
-        let text: String = response.text().await?;
+        let text = read_response(response).await?;
 
         if !status.is_success() && status.as_u16() != 204 {
             return Err(Error::Server(format!(
@@ -498,18 +522,18 @@ impl CardDavClient {
             .await?
             .ok_or_else(|| Error::Server(format!("Contact not found: {contact_id}")))?;
 
-        let url = format!("{}{}", CARDDAV_BASE, href);
+        let url = self.resource_url(&href)?;
         debug!(url = %url, "Deleting contact");
 
         let response = self
             .client
-            .delete(&url)
+            .delete(url)
             .basic_auth(&self.username, Some(&self.app_password))
             .send()
             .await?;
 
         let status = response.status();
-        let text: String = response.text().await?;
+        let text = read_response(response).await?;
 
         if !status.is_success() && status.as_u16() != 204 {
             return Err(Error::Server(format!(
@@ -520,6 +544,12 @@ impl CardDavClient {
 
         Ok(())
     }
+}
+
+async fn read_response(response: reqwest::Response) -> Result<String> {
+    let bytes =
+        crate::util::read_bounded_response(response, crate::util::MAX_ATTACHMENT_BYTES).await?;
+    String::from_utf8(bytes).map_err(|_| Error::Server("Invalid UTF-8 in CardDAV response".into()))
 }
 
 /// Unfold vCard lines per RFC 6350 §3.2: continuation lines start with a space or tab.
@@ -571,6 +601,49 @@ fn decode_qp(s: &str) -> String {
         .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
+fn escape_vcard_text(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\\n")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+}
+
+fn unescape_vcard_text(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            result.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n' | 'N') => result.push('\n'),
+            Some(c @ ('\\' | ';' | ',')) => result.push(c),
+            Some(c) => {
+                result.push('\\');
+                result.push(c);
+            }
+            None => result.push('\\'),
+        }
+    }
+    result
+}
+
+fn vcard_label(label: Option<&str>) -> String {
+    match label.filter(|label| {
+        !label.is_empty()
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ',')
+    }) {
+        Some(label) => format!(";TYPE={label}"),
+        None => String::new(),
+    }
+}
+
 /// Parse a vCard string into a Contact
 fn parse_vcard(vcard_str: &str) -> Option<Contact> {
     let unfolded = unfold_vcard(vcard_str);
@@ -591,7 +664,7 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
             if line.to_uppercase().contains("ENCODING=QUOTED-PRINTABLE") {
                 decode_qp(value)
             } else {
-                value.to_string()
+                unescape_vcard_text(value)
             }
         };
 
@@ -609,7 +682,7 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
             } else {
                 None
             };
-            let email = line.split(':').next_back().unwrap_or("").to_string();
+            let email = extract_value(line);
             if !email.is_empty() {
                 emails.push(ContactEmail { email, label });
             }
@@ -623,7 +696,7 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
             } else {
                 None
             };
-            let number = line.split(':').next_back().unwrap_or("").to_string();
+            let number = extract_value(line);
             if !number.is_empty() {
                 phones.push(ContactPhone { number, label });
             }
@@ -707,44 +780,48 @@ fn build_vcard(
     let mut lines = vec![
         "BEGIN:VCARD".to_string(),
         "VERSION:3.0".to_string(),
-        format!("UID:{uid}"),
-        format!("FN:{name}"),
+        format!("UID:{}", escape_vcard_text(uid)),
+        format!("FN:{}", escape_vcard_text(name)),
     ];
 
     // N property — split FN into family/given (best-effort)
     let parts: Vec<&str> = name.splitn(2, ' ').collect();
     if parts.len() == 2 {
-        lines.push(format!("N:{};{};;;", parts[1], parts[0]));
+        lines.push(format!(
+            "N:{};{};;;",
+            escape_vcard_text(parts[1]),
+            escape_vcard_text(parts[0])
+        ));
     } else {
-        lines.push(format!("N:{name};;;;"));
+        lines.push(format!("N:{};;;;", escape_vcard_text(name)));
     }
 
     for email in emails {
-        if let Some(ref label) = email.label {
-            lines.push(format!("EMAIL;TYPE={label}:{}", email.email));
-        } else {
-            lines.push(format!("EMAIL:{}", email.email));
-        }
+        lines.push(format!(
+            "EMAIL{}:{}",
+            vcard_label(email.label.as_deref()),
+            escape_vcard_text(&email.email)
+        ));
     }
 
     for phone in phones {
-        if let Some(ref label) = phone.label {
-            lines.push(format!("TEL;TYPE={label}:{}", phone.number));
-        } else {
-            lines.push(format!("TEL:{}", phone.number));
-        }
+        lines.push(format!(
+            "TEL{}:{}",
+            vcard_label(phone.label.as_deref()),
+            escape_vcard_text(&phone.number)
+        ));
     }
 
     if let Some(org) = organization {
-        lines.push(format!("ORG:{org}"));
+        lines.push(format!("ORG:{}", escape_vcard_text(org)));
     }
 
     if let Some(t) = title {
-        lines.push(format!("TITLE:{t}"));
+        lines.push(format!("TITLE:{}", escape_vcard_text(t)));
     }
 
     if let Some(n) = notes {
-        lines.push(format!("NOTE:{n}"));
+        lines.push(format!("NOTE:{}", escape_vcard_text(n)));
     }
 
     lines.push("END:VCARD".to_string());
@@ -754,6 +831,53 @@ fn build_vcard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_urls_cannot_redirect_credentials() {
+        let client = CardDavClient::new("test".into(), "secret".into());
+        for href in [
+            "@evil.example/dav/",
+            "//evil.example/dav/",
+            "https://evil.example/",
+            "/\\evil.example/",
+            "https://user@carddav.fastmail.com/",
+        ] {
+            assert!(client.resource_url(href).is_err(), "{href}");
+        }
+        for href in [
+            "/dav/contacts/",
+            "https://carddav.fastmail.com/dav/contacts/",
+        ] {
+            assert_eq!(
+                client.resource_url(href).unwrap().as_str(),
+                "https://carddav.fastmail.com/dav/contacts/"
+            );
+        }
+    }
+
+    #[test]
+    fn vcard_fields_cannot_inject_properties() {
+        let name = "Name\r\nEMAIL:injected@example.com";
+        let notes = "first\nsecond; value, \\n";
+        let vcard = build_vcard(
+            "id",
+            name,
+            &[ContactEmail {
+                email: "real@example.com".into(),
+                label: Some("work\r\nEMAIL:injected@example.com".into()),
+            }],
+            &[],
+            Some("Company; division"),
+            None,
+            Some(notes),
+        );
+        assert_eq!(vcard.lines().filter(|l| l.starts_with("EMAIL")).count(), 1);
+        let contact = parse_vcard(&vcard).unwrap();
+        assert_eq!(contact.name, name.replace("\r\n", "\n"));
+        assert_eq!(contact.notes.as_deref(), Some(notes));
+        assert_eq!(contact.organization.as_deref(), Some("Company; division"));
+        assert_eq!(contact.emails[0].email, "real@example.com");
+    }
 
     #[test]
     fn test_unfold_vcard_lines() {

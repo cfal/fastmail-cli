@@ -10,6 +10,7 @@ pub fn parse_addresses(input: &str) -> Vec<EmailAddress> {
         .map(|s| {
             if let Some(start) = s.find('<')
                 && let Some(end) = s.find('>')
+                && start < end
             {
                 let name = s[..start].trim();
                 let email = s[start + 1..end].trim();
@@ -218,6 +219,28 @@ pub fn infer_image_mime(filename: &str) -> Option<&'static str> {
 
 /// Default max size for MCP (Claude's ~1MB base64 limit means raw < 700KB)
 pub const MCP_IMAGE_MAX_BYTES: usize = 700 * 1024;
+pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
+
+pub(crate) async fn read_bounded_response(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> crate::error::Result<Vec<u8>> {
+    let too_large = || crate::error::Error::Server(format!("Response exceeds {limit} byte limit"));
+    if response
+        .content_length()
+        .is_some_and(|size| size > limit as u64)
+    {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > limit.saturating_sub(bytes.len()) {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
 
 /// Resize image if needed to stay under a size limit
 /// Returns (processed_bytes, mime_type)
@@ -244,7 +267,14 @@ pub fn resize_image(
     };
 
     // Load image
-    let img = image::load_from_memory_with_format(data, format)
+    let mut reader = image::ImageReader::with_format(Cursor::new(data), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader
+        .decode()
         .map_err(|e| format!("Failed to load image: {}", e))?;
 
     // Resize to fit - scale down proportionally
@@ -272,42 +302,46 @@ pub fn resize_image(
 /// characters, with Windows-reserved stems replaced. Returns `fallback` if the
 /// input is empty or entirely composed of unsafe characters.
 pub fn sanitize_filename(raw: &str, fallback: &str) -> String {
+    sanitize_component(raw)
+        .or_else(|| sanitize_component(fallback))
+        .unwrap_or_else(|| "attachment".to_owned())
+}
+
+fn sanitize_component(raw: &str) -> Option<String> {
     // Split on both forward and backslash — Windows-style names from
     // cross-platform clients show up on Unix where only `/` is a separator.
     let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
 
     let filtered: String = base
         .chars()
-        .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
+        .filter(|c| !c.is_control() && !"/\\<>:\"|?*".contains(*c))
         .collect();
 
     let trimmed = filtered.trim_matches(|c: char| c.is_whitespace() || c == '.');
 
     if trimmed.is_empty() || is_windows_reserved_stem(trimmed) {
-        return fallback.to_string();
+        return None;
     }
 
-    // Cap at 200 chars so we leave headroom below the 255-byte filename limit
-    // present on most filesystems, while preserving the extension.
+    // Leave headroom below common 255-byte filesystem limits.
     const MAX_LEN: usize = 200;
     if trimmed.len() <= MAX_LEN {
-        return trimmed.to_string();
+        return Some(trimmed.to_string());
     }
-    match Path::new(trimmed).extension().and_then(|e| e.to_str()) {
-        Some(ext) if ext.len() < 15 => {
-            let stem_len = MAX_LEN - ext.len() - 1;
-            let stem: String = trimmed.chars().take(stem_len).collect();
-            format!("{}.{}", stem, ext)
-        }
-        _ => trimmed.chars().take(MAX_LEN).collect(),
-    }
+    Some(
+        match Path::new(trimmed).extension().and_then(|e| e.to_str()) {
+            Some(ext) if ext.len() < 15 => {
+                let stem_len = MAX_LEN - ext.len() - 1;
+                let stem = &trimmed[..trimmed.floor_char_boundary(stem_len)];
+                format!("{}.{}", stem, ext)
+            }
+            _ => trimmed[..trimmed.floor_char_boundary(MAX_LEN)].to_owned(),
+        },
+    )
 }
 
 fn is_windows_reserved_stem(name: &str) -> bool {
-    let stem = Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_uppercase());
+    let stem = name.split('.').next().map(|s| s.to_uppercase());
     matches!(
         stem.as_deref(),
         Some(
@@ -339,6 +373,7 @@ fn is_windows_reserved_stem(name: &str) -> bool {
 
 /// Load a file from disk as an attachment, inferring MIME type from extension.
 pub fn load_attachment(path: &str) -> anyhow::Result<AttachmentData> {
+    use std::io::Read;
     let p = Path::new(path);
     let filename = p
         .file_name()
@@ -346,8 +381,14 @@ pub fn load_attachment(path: &str) -> anyhow::Result<AttachmentData> {
         .unwrap_or("attachment")
         .to_string();
     let content_type = mime_from_filename(&filename);
-    let data = std::fs::read(p)
+    let mut data = Vec::new();
+    std::fs::File::open(p)?
+        .take(MAX_ATTACHMENT_BYTES as u64 + 1)
+        .read_to_end(&mut data)
         .map_err(|e| anyhow::anyhow!("Failed to read attachment '{}': {}", path, e))?;
+    if data.len() > MAX_ATTACHMENT_BYTES {
+        anyhow::bail!("Attachment exceeds the 64 MiB upload limit");
+    }
     Ok(AttachmentData {
         filename,
         content_type,
@@ -375,6 +416,55 @@ pub fn resolve_html(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn bounded_responses_reject_declared_and_streamed_overflow() {
+        use async_graphql::futures_util::stream;
+        use axum::{Router, body::Body, routing::get};
+        let router = Router::new()
+            .route("/known", get(|| async { "0123456789" }))
+            .route(
+                "/stream",
+                get(|| async {
+                    Body::from_stream(stream::iter([
+                        Ok::<_, std::io::Error>("01234"),
+                        Ok("56789"),
+                    ]))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        for path in ["known", "stream"] {
+            for (limit, accepted) in [(9, false), (10, true)] {
+                let response = reqwest::get(format!("http://127.0.0.1:{port}/{path}"))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    read_bounded_response(response, limit).await.is_ok(),
+                    accepted,
+                    "{path}: {limit}"
+                );
+            }
+        }
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[test]
+    fn oversized_image_dimensions_are_rejected_before_allocation() {
+        let mut image = Vec::new();
+        image::DynamicImage::new_rgb8(16_385, 1)
+            .write_to(
+                &mut std::io::Cursor::new(&mut image),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let error = resize_image(&image, "image/png", 1).unwrap_err();
+        assert!(error.contains("limit"), "{error}");
+    }
 
     #[test]
     fn test_resolve_html_inline() {
@@ -486,6 +576,28 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].email, "bare@example.com");
         assert!(result[0].name.is_none());
+    }
+
+    #[test]
+    fn malformed_address_brackets_do_not_panic() {
+        for address in [">bad<", "name> <address", "<unfinished", "<>"] {
+            assert_eq!(parse_addresses(address).len(), 1);
+        }
+    }
+
+    #[test]
+    fn filenames_are_bounded_in_bytes_and_fallbacks_are_sanitized() {
+        for name in [
+            format!("{}.pdf", "\u{754c}".repeat(200)),
+            "\u{e9}".repeat(300),
+        ] {
+            let filename = sanitize_filename(&name, "fallback");
+            assert!(filename.len() <= 200);
+        }
+        assert_eq!(sanitize_filename("", "../../fallback"), "fallback");
+        assert_eq!(sanitize_filename("", "../.."), "attachment");
+        assert_eq!(sanitize_filename("CON.foo.txt", "ok"), "ok");
+        assert_eq!(sanitize_filename("file:stream.txt", "ok"), "filestream.txt");
     }
 
     #[test]

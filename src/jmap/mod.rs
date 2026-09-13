@@ -584,6 +584,7 @@ impl JmapClient {
     pub fn new(token: String) -> Self {
         let client = Client::builder()
             .timeout(TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build HTTP client");
 
@@ -644,7 +645,10 @@ impl JmapClient {
             _ => {}
         }
 
-        let session: Session = resp.json().await?;
+        resp.error_for_status_ref()?;
+        let bytes =
+            crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await?;
+        let session: Session = serde_json::from_slice(&bytes)?;
         debug!(username = %session.username, "Session established");
         self.available_capabilities = DESIRED_CAPABILITIES
             .iter()
@@ -702,11 +706,10 @@ impl JmapClient {
             _ => {}
         }
 
-        let body = resp.text().await?;
-        let jmap_resp: JmapResponse = serde_json::from_str(&body).map_err(|e| {
-            debug!("Failed to parse JMAP response: {e}");
-            Error::Server(body.trim().to_string())
-        })?;
+        resp.error_for_status_ref()?;
+        let body =
+            crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await?;
+        let jmap_resp: JmapResponse = serde_json::from_slice(&body)?;
         Ok(jmap_resp.method_responses)
     }
 
@@ -1079,6 +1082,7 @@ impl JmapClient {
         // one — the difference between reconnecting and hanging forever.
         let client = Client::builder()
             .read_timeout(Duration::from_secs(u64::from(ping) * 3))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
         let mut req = client
@@ -1359,7 +1363,7 @@ impl JmapClient {
         Ok(email_id)
     }
 
-    #[instrument(skip(self, body, params))]
+    #[instrument(skip(self, to, subject, body, params))]
     pub async fn send_email(
         &mut self,
         to: Vec<EmailAddress>,
@@ -1473,13 +1477,18 @@ impl JmapClient {
             _ => {}
         }
 
-        let bytes = resp.bytes().await?;
-        Ok(bytes.to_vec())
+        resp.error_for_status_ref()?;
+        crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await
     }
 
     /// Upload a blob (for attachments) and return the blobId
     #[instrument(skip(self, data))]
     pub async fn upload_blob(&self, data: Vec<u8>, content_type: &str) -> Result<String> {
+        if data.len() > crate::util::MAX_ATTACHMENT_BYTES {
+            return Err(Error::Config(
+                "Attachment exceeds the 64 MiB upload limit".into(),
+            ));
+        }
         let account_id = self.account_id()?;
         let session = self.session()?;
 
@@ -1500,13 +1509,14 @@ impl JmapClient {
             401 => return Err(Error::InvalidToken("Token expired or invalid")),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            code => {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(Error::Server(format!("Upload failed ({}): {}", code, text)));
+            _ => {
+                return Err(Error::Server(format!("Upload failed ({})", resp.status())));
             }
         }
 
-        let body: Value = resp.json().await?;
+        let bytes =
+            crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await?;
+        let body: Value = serde_json::from_slice(&bytes)?;
         body.get("blobId")
             .and_then(|v| v.as_str())
             .map(String::from)
@@ -1521,7 +1531,7 @@ impl JmapClient {
     /// on the caller side means the MCP preview path and the send path use
     /// exactly the same recipient lists, so the preview cannot under-report
     /// or diverge from what will actually be sent.
-    #[instrument(skip(self, body, params))]
+    #[instrument(skip(self, original, to, body, params))]
     pub async fn reply_email(
         &mut self,
         original: &Email,
@@ -1577,7 +1587,7 @@ impl JmapClient {
     }
 
     /// Forward an email with proper attribution
-    #[instrument(skip(self, body, params))]
+    #[instrument(skip(self, original, to, body, params))]
     pub async fn forward_email(
         &mut self,
         original: &Email,
