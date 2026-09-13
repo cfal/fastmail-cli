@@ -281,6 +281,26 @@ async fn run_with_carddav(
 }
 
 #[tokio::test]
+async fn subscription_rejects_zero_poll_without_network_access() {
+    use async_graphql::futures_util::StreamExt;
+    let server = mock_server(0).await;
+    let schema = build_schema();
+    let req = request(
+        "subscription { emails(pollSeconds: 0) { id } }",
+        client_for(&server),
+        CardDavCreds::default(),
+    );
+    let response = schema.execute_stream(req).next().await.unwrap();
+    assert!(
+        response
+            .errors
+            .iter()
+            .any(|e| e.message.contains("at least one second"))
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn listing_without_bodies_makes_no_extra_fetch() {
     let server = mock_server(5).await;
     let resp = run(&server, "{ emails { nodes { id subject } } }").await;

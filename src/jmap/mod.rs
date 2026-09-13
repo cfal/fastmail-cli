@@ -2362,7 +2362,7 @@ mod tests {
     // ============ upload_blob mock test ============
 
     /// Build a client pointed at a mock JMAP server.
-    fn mock_client(uri: &str) -> JmapClient {
+    pub(super) fn mock_client(uri: &str) -> JmapClient {
         let mut client = JmapClient::new("test-token".to_string());
         let mut session = create_test_session(vec![
             "urn:ietf:params:jmap:core",
@@ -2375,7 +2375,7 @@ mod tests {
     }
 
     /// One `methodResponses` envelope around a single method result.
-    fn jmap_response(method: &str, result: serde_json::Value) -> serde_json::Value {
+    pub(super) fn jmap_response(method: &str, result: serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "methodResponses": [[method, result, "c0"]] })
     }
 

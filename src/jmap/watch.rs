@@ -58,6 +58,8 @@ pub struct ArrivalWatcher {
     mailbox_id: Option<String>,
     full: bool,
     wake: Wake,
+    retry_pending: bool,
+    retry_backoff: u64,
 }
 
 impl ArrivalWatcher {
@@ -71,6 +73,14 @@ impl ArrivalWatcher {
         full: bool,
         poll: Option<Duration>,
     ) -> Result<Self> {
+        if poll.is_some_and(|interval| {
+            interval < Duration::from_secs(1)
+                || tokio::time::Instant::now().checked_add(interval).is_none()
+        }) {
+            return Err(Error::Config(
+                "Polling interval must be at least one second and fit the system clock".into(),
+            ));
+        }
         let (mailbox_id, state) = {
             let mut locked = client.lock().await;
             let mailbox_id = match mailbox {
@@ -87,6 +97,8 @@ impl ArrivalWatcher {
             state,
             mailbox_id,
             full,
+            retry_pending: false,
+            retry_backoff: BACKOFF_START,
             wake: match poll {
                 Some(interval) => Wake::Poll(interval),
                 None => Wake::Push {
@@ -107,8 +119,24 @@ impl ArrivalWatcher {
     /// is retried internally with backoff, because a watcher that exits on one
     /// blip is useless in the loop it exists to feed.
     pub async fn next_arrivals(&mut self) -> Result<Arrivals> {
-        self.wait().await?;
-        self.drain().await
+        if self.retry_pending {
+            sleep_backoff(&mut self.retry_backoff).await;
+        } else {
+            self.wait().await?;
+        }
+        match self.drain().await {
+            Ok(arrivals) => {
+                self.retry_pending = false;
+                self.retry_backoff = BACKOFF_START;
+                Ok(arrivals)
+            }
+            Err(e) if is_fatal(&e) => Err(e),
+            Err(e) => {
+                debug!("Could not reconcile arrivals ({e}); retrying");
+                self.retry_pending = true;
+                Ok(Arrivals::none())
+            }
+        }
     }
 
     /// Wait until there is reason to believe something changed.
@@ -169,10 +197,17 @@ impl ArrivalWatcher {
                     *backoff = BACKOFF_START;
 
                     let mut changed = false;
-                    for event in parser
-                        .feed(&String::from_utf8_lossy(&bytes))
-                        .map_err(|message| Error::Server(message.into()))?
-                    {
+                    let events = match parser.feed_bytes(&bytes) {
+                        Ok(events) => events,
+                        Err(message) => {
+                            debug!("Invalid event stream ({message}); reconnecting");
+                            *stream = None;
+                            *parser = EventParser::default();
+                            sleep_backoff(backoff).await;
+                            return Ok(());
+                        }
+                    };
+                    for event in events {
                         if let Some(id) = event.id {
                             *last_event_id = Some(id);
                         }
@@ -189,6 +224,7 @@ impl ArrivalWatcher {
                 Ok(None) | Err(_) => {
                     debug!("Event stream ended; reconnecting");
                     *stream = None;
+                    *parser = EventParser::default();
                     sleep_backoff(backoff).await;
                     // Reconcile across the gap before waiting again, so mail
                     // that landed while disconnected is reported now rather
@@ -215,15 +251,11 @@ impl ArrivalWatcher {
                     resynced: true,
                 });
             }
-            Err(e) if is_fatal(&e) => return Err(e),
-            Err(e) => {
-                debug!("Could not read changes ({e})");
-                return Ok(Arrivals::none());
-            }
+            Err(e) => return Err(e),
         };
 
-        self.state = changes.new_state;
         if changes.created.is_empty() {
+            self.state = changes.new_state;
             return Ok(Arrivals::none());
         }
 
@@ -233,22 +265,13 @@ impl ArrivalWatcher {
             client.get_email_summaries(&changes.created).await
         };
 
-        let mut emails = match fetched {
-            Ok(emails) => emails,
-            Err(e) if is_fatal(&e) => return Err(e),
-            Err(e) => {
-                debug!(
-                    "Could not fetch {} new email(s) ({e})",
-                    changes.created.len()
-                );
-                return Ok(Arrivals::none());
-            }
-        };
+        let mut emails = fetched?;
 
         emails.retain(|email| in_mailbox(email, self.mailbox_id.as_deref()));
         // `Email/get` makes no ordering guarantee, and a stream reads
         // chronologically.
         emails.sort_by(|a, b| a.received_at.cmp(&b.received_at));
+        self.state = changes.new_state;
 
         Ok(Arrivals {
             emails,
@@ -283,6 +306,110 @@ fn is_fatal(e: &Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jmap::tests::{jmap_response, mock_client};
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_string_contains, method},
+    };
+
+    fn watcher(client: JmapClient, full: bool) -> ArrivalWatcher {
+        ArrivalWatcher {
+            client: std::sync::Arc::new(tokio::sync::Mutex::new(client)),
+            state: "s0".into(),
+            mailbox_id: None,
+            full,
+            wake: Wake::Poll(Duration::from_secs(1)),
+            retry_pending: false,
+            retry_backoff: BACKOFF_START,
+        }
+    }
+
+    async fn arrivals_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("Email/changes"))
+            .and(body_string_contains(r#""sinceState":"s0""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", json!({
+                "newState": "s1", "created": ["e1"], "updated": [], "destroyed": [], "hasMoreChanges": false
+            }))))
+            .mount(&server).await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("Email/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Email/get",
+                json!({
+                    "state": "s1", "list": [{"id":"e1"}], "notFound": []
+                }),
+            )))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn failed_detail_fetch_preserves_cursor_and_retries_without_a_push() {
+        for full in [true, false] {
+            let server = arrivals_server().await;
+            Mock::given(method("POST"))
+                .and(body_string_contains("Email/get"))
+                .respond_with(ResponseTemplate::new(503))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            let mut watcher = watcher(mock_client(&server.uri()), full);
+            watcher.retry_pending = true;
+            watcher.retry_backoff = 0;
+            assert!(watcher.next_arrivals().await.unwrap().emails.is_empty());
+            assert_eq!(watcher.state, "s0");
+            assert!(watcher.retry_pending);
+            watcher.wake = Wake::Push {
+                stream: None,
+                parser: EventParser::default(),
+                backoff: 1,
+                last_event_id: None,
+            };
+            let arrivals = watcher.next_arrivals().await.unwrap();
+            assert_eq!(arrivals.emails[0].id, "e1");
+            assert_eq!(watcher.state, "s1");
+            assert!(!watcher.retry_pending);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_push_frame_reconciles_instead_of_ending_watch() {
+        let server = arrivals_server().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("data: exceeds limit\n\n", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let mut client = mock_client(&server.uri());
+        client.session.as_mut().unwrap().event_source_url = Some(server.uri());
+        let stream = client.open_event_stream(30, None).await.unwrap();
+        let mut watcher = watcher(client, false);
+        watcher.wake = Wake::Push {
+            stream: Some(stream),
+            parser: EventParser::with_limit(16),
+            backoff: 1,
+            last_event_id: None,
+        };
+        assert_eq!(watcher.next_arrivals().await.unwrap().emails[0].id, "e1");
+        assert!(matches!(watcher.wake, Wake::Push { stream: None, .. }));
+    }
+
+    #[tokio::test]
+    async fn zero_poll_is_rejected_before_network_access() {
+        let client = std::sync::Arc::new(tokio::sync::Mutex::new(JmapClient::new("test".into())));
+        assert!(
+            ArrivalWatcher::new(client, None, false, Some(Duration::ZERO))
+                .await
+                .is_err()
+        );
+    }
 
     fn email_in(mailbox_ids: &[&str]) -> Email {
         let ids: serde_json::Map<_, _> = mailbox_ids

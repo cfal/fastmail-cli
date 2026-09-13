@@ -233,6 +233,19 @@ async fn watch_uses_http_event_stream_and_polling() {
 }
 
 #[tokio::test]
+async fn zero_poll_is_rejected_without_contacting_the_server() {
+    let server = self::server().await;
+    let home = tempfile::tempdir().unwrap();
+    let output = command(&server, home.path())
+        .args(["watch", "--poll", "0"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn http_login_never_follows_redirects_or_falls_back_to_fastmail() {
     let destination = MockServer::start().await;
     let server = MockServer::start().await;

@@ -19,40 +19,57 @@ pub struct ServerEvent {
 /// Chunk boundaries fall wherever the network puts them — mid-frame, mid-line,
 /// even between the `\r` and `\n` of a line ending — so partial input is held
 /// until the blank line that terminates a frame actually arrives.
-#[derive(Default)]
 pub struct EventParser {
-    buf: String,
+    buf: Vec<u8>,
+    skip_lf: bool,
+    limit: usize,
+}
+
+impl Default for EventParser {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            skip_lf: false,
+            limit: 1024 * 1024,
+        }
+    }
 }
 
 impl EventParser {
     /// Append a chunk and return every frame it completed.
     pub fn feed(&mut self, chunk: &str) -> Result<Vec<ServerEvent>, &'static str> {
-        if self.buf.len().saturating_add(chunk.len()) > 1024 * 1024 {
-            self.buf.clear();
-            return Err("Event stream frame exceeds 1 MiB");
-        }
-        self.buf.push_str(chunk);
+        self.feed_bytes(chunk.as_bytes())
+    }
 
+    pub fn feed_bytes(&mut self, chunk: &[u8]) -> Result<Vec<ServerEvent>, &'static str> {
         let mut out = Vec::new();
-        while let Some((at, len)) = next_frame_end(&self.buf) {
-            let frame: String = self.buf.drain(..at + len).collect();
-            if let Some(event) = parse_frame(&frame) {
-                out.push(event);
+        for &byte in chunk {
+            if self.skip_lf && byte == b'\n' {
+                self.skip_lf = false;
+                continue;
+            }
+            self.skip_lf = byte == b'\r';
+            self.buf.push(if byte == b'\r' { b'\n' } else { byte });
+            if self.buf.len() > self.limit {
+                self.buf.clear();
+                return Err("Event stream frame exceeds its size limit");
+            }
+            if self.buf.ends_with(b"\n\n") {
+                if let Some(event) = parse_frame(&String::from_utf8_lossy(&self.buf)) {
+                    out.push(event);
+                }
+                self.buf.clear();
             }
         }
         Ok(out)
     }
-}
 
-/// Offset and length of the first frame separator: a blank line, in either
-/// line-ending convention. Returns the earliest match so a stream that mixes
-/// them cannot desynchronise.
-fn next_frame_end(buf: &str) -> Option<(usize, usize)> {
-    let lf = buf.find("\n\n").map(|at| (at, 2));
-    let crlf = buf.find("\r\n\r\n").map(|at| (at, 4));
-    match (lf, crlf) {
-        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
-        (found, None) | (None, found) => found,
+    #[cfg(test)]
+    pub(super) fn with_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
     }
 }
 
@@ -75,7 +92,7 @@ fn parse_frame(frame: &str) -> Option<ServerEvent> {
         match field {
             "event" => event.event = Some(value.to_string()),
             "data" => data.push(value),
-            "id" => event.id = Some(value.to_string()),
+            "id" if !value.contains('\0') => event.id = Some(value.to_string()),
             // `retry` and unknown fields are ignored: reconnect backoff is the
             // caller's, and it has better information than the server does.
             _ => continue,
@@ -122,8 +139,8 @@ mod tests {
     #[test]
     fn holds_a_frame_split_between_cr_and_lf() {
         let mut parser = EventParser::default();
-        assert!(parser.feed("data: hi\r\n\r").unwrap().is_empty());
-        let events = parser.feed("\ndata: there\r\n\r\n").unwrap();
+        let mut events = parser.feed("data: hi\r\n\r").unwrap();
+        events.extend(parser.feed("\ndata: there\r\n\r\n").unwrap());
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].data, "hi");
         assert_eq!(events[1].data, "there");
@@ -159,9 +176,28 @@ mod tests {
 
     #[test]
     fn unterminated_frames_cannot_grow_without_bound() {
-        let mut parser = EventParser::default();
-        assert!(parser.feed(&"x".repeat(1024 * 1024)).unwrap().is_empty());
+        let mut parser = EventParser::with_limit(16);
+        assert!(parser.feed(&"x".repeat(16)).unwrap().is_empty());
         assert!(parser.feed("x").is_err());
         assert!(parser.buf.is_empty());
+    }
+
+    #[test]
+    fn frame_limit_is_independent_of_chunk_size() {
+        let mut parser = EventParser::with_limit(16);
+        assert_eq!(parser.feed(&"data: ok\n\n".repeat(10)).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn utf8_and_line_endings_can_cross_chunk_boundaries() {
+        let input = "id: caf\u{e9}\rdata: hi\r\n\r\n";
+        let mut parser = EventParser::default();
+        let mut events = Vec::new();
+        for byte in input.as_bytes() {
+            events.extend(parser.feed_bytes(&[*byte]).unwrap());
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id.as_deref(), Some("caf\u{e9}"));
+        assert_eq!(events[0].data, "hi");
     }
 }

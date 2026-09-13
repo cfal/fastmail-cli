@@ -82,8 +82,8 @@ enum Commands {
         #[arg(long)]
         full: bool,
 
-        /// Check every N seconds instead of holding a push connection open
-        #[arg(long, value_name = "SECONDS")]
+        /// Check every N seconds (at least 1) instead of holding a push connection open
+        #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
         poll: Option<u64>,
     },
 

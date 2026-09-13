@@ -52,7 +52,7 @@ impl SubscriptionRoot {
         )]
         full: bool,
         #[graphql(
-            desc = "Check on this interval instead of holding a push connection open. For \
+            desc = "Check every N seconds (at least 1) instead of holding a push connection open. For \
                     networks that will not keep one alive; the results are the same."
         )]
         poll_seconds: Option<u64>,
