@@ -2482,7 +2482,7 @@ mod tests {
                     {"id":"drafts", "name":"Drafts", "role":"drafts"},
                     {"id":"sent", "name":"Sent", "role":"sent"}
                 ]})),
-                "Identity/get" => jmap_response("Identity/get", json!({"list":[{"id":"i0", "email":"sender@example.test"}]})),
+                "Identity/get" => jmap_response("Identity/get", json!({"list":[{"id":"i0", "name":"Sender", "email":"sender@example.test"}]})),
                 "Email/set" => {
                     let email = &calls[0][1]["create"]["email"];
                     assert_eq!(email["mailboxIds"], json!({"drafts":true}));
@@ -2503,6 +2503,12 @@ mod tests {
         client
             .available_capabilities
             .push("urn:ietf:params:jmap:submission".into());
+        client
+            .session
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .insert("urn:ietf:params:jmap:submission".into(), json!({}));
         let error = client
             .send_email(
                 vec![EmailAddress {
@@ -2523,7 +2529,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("Not sent"));
+        assert!(error.to_string().contains("Not sent"), "{error}");
     }
 
     #[tokio::test]
