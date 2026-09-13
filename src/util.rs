@@ -177,7 +177,11 @@ pub fn mime_from_filename(filename: &str) -> String {
 // ============ Image Processing ============
 
 /// Parse a human-readable size string like "500K", "1M", "1.5MB" into bytes
-pub fn parse_size(s: &str) -> Result<usize, String> {
+pub fn parse_size(s: &str) -> Option<usize> {
+    parse_size_checked(s).ok()
+}
+
+pub fn parse_size_checked(s: &str) -> Result<usize, String> {
     let normalized = s.trim().to_ascii_uppercase();
     let size = normalized.strip_suffix('B').unwrap_or(&normalized);
     let (number, multiplier) = match size.as_bytes().last() {
@@ -450,13 +454,14 @@ mod tests {
 
     #[test]
     fn size_limits_reject_invalid_or_nonpositive_values() {
-        assert_eq!(parse_size("1.5MB").unwrap(), 1_572_864);
-        assert_eq!(parse_size("500K").unwrap(), 512_000);
-        assert_eq!(parse_size("1B").unwrap(), 1);
+        assert_eq!(parse_size_checked("1.5MB").unwrap(), 1_572_864);
+        assert_eq!(parse_size_checked("500K").unwrap(), 512_000);
+        assert_eq!(parse_size("1B"), Some(1));
         for size in [
             "", "oops", "0", "-1K", "NaNM", "infG", "1e100G", "1BB", "0.1B",
         ] {
-            assert!(parse_size(size).is_err(), "{size}");
+            assert!(parse_size_checked(size).is_err(), "{size}");
+            assert_eq!(parse_size(size), None);
         }
     }
 

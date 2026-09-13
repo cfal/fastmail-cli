@@ -91,13 +91,13 @@ pub struct JmapClient {
 /// Create an authenticated JMAP client from config
 pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
     if let Some(server) = crate::remote::HttpServer::current() {
-        let mut client = JmapClient::via_server(server)?;
+        let mut client = JmapClient::try_via_server(server)?;
         client.authenticate().await?;
         return Ok(client);
     }
     let config = crate::config::Config::load()?;
     let token = config.get_token()?;
-    let mut client = JmapClient::new(token)?;
+    let mut client = JmapClient::try_new(token)?;
     client.authenticate().await?;
     Ok(client)
 }
@@ -593,7 +593,12 @@ fn dedup_by_email(addrs: &mut Vec<EmailAddress>) {
 }
 
 impl JmapClient {
-    pub fn new(token: String) -> Result<Self> {
+    /// Infallible compatibility constructor. Servers should use `try_new`.
+    pub fn new(token: String) -> Self {
+        Self::try_new(token).expect("Failed to build HTTP client")
+    }
+
+    pub fn try_new(token: String) -> Result<Self> {
         Ok(Self {
             client: crate::util::http_client()?,
             event_client: Arc::new(std::sync::Mutex::new(None)),
@@ -605,11 +610,15 @@ impl JmapClient {
         })
     }
 
-    pub fn via_server(server: crate::remote::HttpServer) -> Result<Self> {
-        let mut client = Self::new(String::new())?;
+    pub fn try_via_server(server: crate::remote::HttpServer) -> Result<Self> {
+        let mut client = Self::try_new(String::new())?;
         client.session_url = server.url("session").to_string();
         client.server = Some(server);
         Ok(client)
+    }
+
+    pub fn via_server(server: crate::remote::HttpServer) -> Self {
+        Self::try_via_server(server).expect("Failed to build HTTP client")
     }
 
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -633,7 +642,7 @@ impl JmapClient {
     /// tests can exercise the handshake itself.
     #[cfg(test)]
     pub fn with_test_session(api_url: &str) -> Self {
-        let mut client = Self::new("test-token".into()).unwrap();
+        let mut client = Self::try_new("test-token".into()).unwrap();
         client.session_url = format!("{api_url}/session");
         client.available_capabilities =
             DESIRED_CAPABILITIES.iter().map(|s| s.to_string()).collect();
@@ -659,7 +668,7 @@ impl JmapClient {
 
     #[cfg(test)]
     pub fn with_test_session_endpoint(url: &str) -> Self {
-        let mut client = Self::new("test-token".into()).unwrap();
+        let mut client = Self::try_new("test-token".into()).unwrap();
         client.session_url = url.into();
         client
     }
@@ -1733,6 +1742,24 @@ impl JmapClient {
 
     #[instrument(skip(self))]
     pub async fn mark_read(&self, email_id: &str, read: bool) -> Result<()> {
+        self.update_keywords(
+            email_id,
+            json!({"keywords/$seen": if read { json!(true) } else { Value::Null }}),
+        )
+        .await
+    }
+
+    /// Replace the complete keyword map. Use `mark_read` for atomic seen changes.
+    pub async fn set_keywords(
+        &self,
+        email_id: &str,
+        keywords: HashMap<String, bool>,
+    ) -> Result<()> {
+        self.update_keywords(email_id, json!({"keywords":keywords}))
+            .await
+    }
+
+    async fn update_keywords(&self, email_id: &str, patch: Value) -> Result<()> {
         let account_id = self.account_id()?;
 
         let responses = self
@@ -1741,9 +1768,7 @@ impl JmapClient {
                 {
                     "accountId": account_id,
                     "update": {
-                        (email_id): {
-                            "keywords/$seen": if read { json!(true) } else { Value::Null }
-                        }
+                        (email_id): patch
                     }
                 },
                 "k0"
@@ -1986,7 +2011,7 @@ mod tests {
 
     #[test]
     fn test_require_capability_succeeds_when_present() {
-        let mut client = JmapClient::new("test-token".to_string()).unwrap();
+        let mut client = JmapClient::try_new("test-token".to_string()).unwrap();
         client.session = Some(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
@@ -2002,7 +2027,7 @@ mod tests {
 
     #[test]
     fn test_require_capability_fails_when_missing() {
-        let mut client = JmapClient::new("test-token".to_string()).unwrap();
+        let mut client = JmapClient::try_new("test-token".to_string()).unwrap();
         client.session = Some(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
@@ -2018,7 +2043,7 @@ mod tests {
 
     #[test]
     fn test_require_capability_fails_when_no_session() {
-        let client = JmapClient::new("test-token".to_string()).unwrap();
+        let client = JmapClient::try_new("test-token".to_string()).unwrap();
 
         let result = client.require_capability("urn:ietf:params:jmap:submission", "Email sending");
         assert!(result.is_err());
@@ -2030,7 +2055,7 @@ mod tests {
 
     #[test]
     fn test_require_capability_works_for_masked_email() {
-        let mut client = JmapClient::new("test-token".to_string()).unwrap();
+        let mut client = JmapClient::try_new("test-token".to_string()).unwrap();
         client.session = Some(create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
@@ -2408,7 +2433,7 @@ mod tests {
 
     /// Build a client pointed at a mock JMAP server.
     pub(super) fn mock_client(uri: &str) -> JmapClient {
-        let mut client = JmapClient::new("test-token".to_string()).unwrap();
+        let mut client = JmapClient::try_new("test-token".to_string()).unwrap();
         let mut session = create_test_session(vec![
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:mail",
@@ -2746,7 +2771,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string()).unwrap();
+        let mut client = JmapClient::try_new("test-token".to_string()).unwrap();
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
         client.session = Some(session);
@@ -2770,7 +2795,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string()).unwrap();
+        let mut client = JmapClient::try_new("test-token".to_string()).unwrap();
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
         client.session = Some(session);
@@ -2796,7 +2821,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut client = JmapClient::new("test-token".to_string()).unwrap();
+        let mut client = JmapClient::try_new("test-token".to_string()).unwrap();
         let mut session = create_test_session(vec!["urn:ietf:params:jmap:core"]);
         session.upload_url = format!("{}/upload/{{accountId}}/", mock_server.uri());
         client.session = Some(session);

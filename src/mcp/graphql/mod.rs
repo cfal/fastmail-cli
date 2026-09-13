@@ -81,7 +81,7 @@ impl CardDavCreds {
             .ok_or_else(|| {
                 async_graphql::Error::new("App password not configured for this request.")
             })?;
-        Ok(crate::carddav::CardDavClient::new(
+        Ok(crate::carddav::CardDavClient::try_new(
             username.clone(),
             password.clone(),
         )?)

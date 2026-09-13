@@ -39,7 +39,7 @@ async fn cached_client(cache: &ClientCache, token: &str) -> anyhow::Result<Share
     if let Some(client) = cache.get(token) {
         return Ok(client.clone());
     }
-    let client = Arc::new(Mutex::new(JmapClient::new(token.to_string())?));
+    let client = Arc::new(Mutex::new(JmapClient::try_new(token.to_string())?));
     cache.insert(token.into(), client.clone());
     Ok(client)
 }

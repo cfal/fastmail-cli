@@ -1,7 +1,7 @@
 use crate::jmap::authenticated_client;
 use crate::models::Output;
 use crate::util::{
-    extract_text, infer_image_mime, is_image, parse_size, resize_image, sanitize_filename,
+    extract_text, infer_image_mime, is_image, parse_size_checked, resize_image, sanitize_filename,
 };
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -14,7 +14,7 @@ pub async fn download_attachment(
     max_size: Option<&str>,
 ) -> anyhow::Result<()> {
     let max_bytes = max_size
-        .map(parse_size)
+        .map(parse_size_checked)
         .transpose()
         .map_err(anyhow::Error::msg)?;
     let client = authenticated_client().await?;

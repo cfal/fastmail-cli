@@ -93,7 +93,12 @@ struct ContactResource {
 }
 
 impl CardDavClient {
-    pub fn new(username: String, app_password: String) -> Result<Self> {
+    /// Infallible compatibility constructor. Servers should use `try_new`.
+    pub fn new(username: String, app_password: String) -> Self {
+        Self::try_new(username, app_password).expect("Failed to build CardDAV client")
+    }
+
+    pub fn try_new(username: String, app_password: String) -> Result<Self> {
         Ok(Self {
             client: crate::util::http_client()?,
             username,
@@ -103,10 +108,14 @@ impl CardDavClient {
         })
     }
 
-    pub fn via_server(server: crate::remote::HttpServer) -> Result<Self> {
-        let mut client = Self::new(String::new(), String::new())?;
+    pub fn try_via_server(server: crate::remote::HttpServer) -> Result<Self> {
+        let mut client = Self::try_new(String::new(), String::new())?;
         client.server = Some(server);
         Ok(client)
+    }
+
+    pub fn via_server(server: crate::remote::HttpServer) -> Self {
+        Self::try_via_server(server).expect("Failed to build CardDAV client")
     }
 
     fn resource_url(&self, href: &str) -> Result<reqwest::Url> {
@@ -398,22 +407,26 @@ impl CardDavClient {
                     .descendants()
                     .find(|n| n.has_tag_name((carddav_ns, "address-data")))
                     .and_then(|n| n.text())
-                {
-                    if self
+                    && self
                         .contact_at(vcard_data, href)?
                         .is_some_and(|c| c.id == contact_id)
-                    {
-                        let etag = response.descendants()
-                            .find(|n| n.has_tag_name((dav_ns, "getetag")))
-                            .and_then(|n| n.text())
-                            .filter(|value| value.starts_with('"') && value.ends_with('"'))
-                            .ok_or_else(|| Error::Server("Contact has no strong ETag; refusing an unconditional mutation".into()))?;
-                        return Ok(Some(ContactResource {
-                            href: href.into(),
-                            vcard: vcard_data.into(),
-                            etag: etag.into(),
-                        }));
-                    }
+                {
+                    let etag = response
+                        .descendants()
+                        .find(|n| n.has_tag_name((dav_ns, "getetag")))
+                        .and_then(|n| n.text())
+                        .filter(|value| value.starts_with('"') && value.ends_with('"'))
+                        .ok_or_else(|| {
+                            Error::Server(
+                                "Contact has no strong ETag; refusing an unconditional mutation"
+                                    .into(),
+                            )
+                        })?;
+                    return Ok(Some(ContactResource {
+                        href: href.into(),
+                        vcard: vcard_data.into(),
+                        etag: etag.into(),
+                    }));
                 }
             }
         }
@@ -937,7 +950,7 @@ mod tests {
 
     #[test]
     fn resource_urls_cannot_redirect_credentials() {
-        let client = CardDavClient::new("test".into(), "secret".into()).unwrap();
+        let client = CardDavClient::try_new("test".into(), "secret".into()).unwrap();
         for href in [
             "@evil.example/dav/",
             "//evil.example/dav/",
@@ -1041,7 +1054,7 @@ mod tests {
     #[test]
     fn uidless_contacts_use_stable_distinct_resource_ids() {
         let vcard = "BEGIN:VCARD\nFN:No UID\nEND:VCARD";
-        let client = CardDavClient::new("user".into(), "password".into()).unwrap();
+        let client = CardDavClient::try_new("user".into(), "password".into()).unwrap();
         let a = client.contact_at(vcard, "/books/a.vcf").unwrap().unwrap();
         let b = client.contact_at(vcard, "/books/b.vcf").unwrap().unwrap();
         assert!(a.id.starts_with("href:"));
@@ -1107,7 +1120,7 @@ mod tests {
     async fn contact_server(vcard: &str, etag: &str) -> (CardDavClient, wiremock::MockServer) {
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
         let server = MockServer::start().await;
-        let mut client = CardDavClient::new("user".into(), "password".into()).unwrap();
+        let mut client = CardDavClient::try_new("user".into(), "password".into()).unwrap();
         client.base_url = server.uri();
         Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(207).set_body_string(
             r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#
@@ -1226,7 +1239,7 @@ mod tests {
             .mount(&server)
             .await;
         for username in ["alice", "bob"] {
-            let mut client = CardDavClient::new(username.into(), "password".into()).unwrap();
+            let mut client = CardDavClient::try_new(username.into(), "password".into()).unwrap();
             client.base_url = server.uri();
             client.list_addressbooks().await.unwrap();
         }
