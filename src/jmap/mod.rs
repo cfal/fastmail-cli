@@ -1701,11 +1701,7 @@ impl JmapClient {
     }
 
     #[instrument(skip(self))]
-    pub async fn set_keywords(
-        &self,
-        email_id: &str,
-        keywords: HashMap<String, bool>,
-    ) -> Result<()> {
+    pub async fn mark_read(&self, email_id: &str, read: bool) -> Result<()> {
         let account_id = self.account_id()?;
 
         let responses = self
@@ -1715,7 +1711,7 @@ impl JmapClient {
                     "accountId": account_id,
                     "update": {
                         (email_id): {
-                            "keywords": keywords
+                            "keywords/$seen": if read { json!(true) } else { Value::Null }
                         }
                     }
                 },

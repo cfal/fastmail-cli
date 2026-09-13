@@ -301,6 +301,50 @@ async fn subscription_rejects_zero_poll_without_network_access() {
 }
 
 #[tokio::test]
+async fn mark_read_patches_only_seen_even_after_a_concurrent_keyword_change() {
+    use std::sync::Mutex;
+    let server = mock_server(1).await;
+    let keywords = Arc::new(Mutex::new(json!({"$flagged":true, "custom":true})));
+    let updated = keywords.clone();
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::body_string_contains("Email/set"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap();
+            let patch = &body["methodCalls"][0][1]["update"]["e0"];
+            assert_eq!(patch.as_object().unwrap().len(), 1);
+            let seen = patch.get("keywords/$seen").unwrap();
+            let mut keywords = updated.lock().unwrap();
+            if seen.is_null() {
+                keywords.as_object_mut().unwrap().remove("$seen");
+            } else {
+                keywords["$seen"] = seen.clone();
+            }
+            ResponseTemplate::new(200).set_body_json(
+                json!({"methodResponses":[["Email/set", {"updated":{"e0":null}}, "k0"]]}),
+            )
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    for read in [true, false] {
+        let response = run(
+            &server,
+            &format!("mutation {{ markAsRead(emailId: \"e0\", read: {read}) {{ success }} }}"),
+        )
+        .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        assert_eq!(
+            response.data.into_json().unwrap()["markAsRead"]["success"],
+            true
+        );
+        let keywords = keywords.lock().unwrap();
+        assert_eq!(keywords["$flagged"], true);
+        assert_eq!(keywords["custom"], true);
+        assert_eq!(keywords.get("$seen").is_some(), read);
+    }
+}
+
+#[tokio::test]
 async fn listing_without_bodies_makes_no_extra_fetch() {
     let server = mock_server(5).await;
     let resp = run(&server, "{ emails { nodes { id subject } } }").await;

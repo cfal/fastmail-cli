@@ -431,14 +431,7 @@ impl MutationRoot {
         let read = read.unwrap_or(true);
 
         let email = client.get_email(&email_id).await?;
-        let mut keywords = email.keywords.clone();
-        if read {
-            keywords.insert("$seen".to_string(), true);
-        } else {
-            keywords.remove("$seen");
-        }
-
-        match client.set_keywords(&email_id, keywords).await {
+        match client.mark_read(&email_id, read).await {
             Ok(()) => {
                 let status = if read { "read" } else { "unread" };
                 Ok(GqlStatus {
