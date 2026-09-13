@@ -434,10 +434,8 @@ async fn graphql_endpoint(
 
 /// GraphQL subscriptions over Server-Sent Events, one event per response.
 ///
-/// SSE rather than WebSockets because the only subscription here is a
-/// server-to-client firehose: nothing is ever sent back up the socket, and SSE
-/// reconnects on its own. It is also the same shape the CLI consumes from
-/// Fastmail, which keeps one mental model for the whole path.
+/// Each POST starts a new watcher. This downstream stream is not resumable;
+/// subscribers must query for arrivals during any disconnected interval.
 async fn graphql_stream_endpoint(
     axum::extract::State(mcp): axum::extract::State<FastmailMcp>,
     axum::Json(req): axum::Json<HttpGraphqlRequest>,

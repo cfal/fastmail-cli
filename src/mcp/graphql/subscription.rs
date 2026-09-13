@@ -29,18 +29,18 @@ impl SubscriptionRoot {
     /// Emits each email as it arrives, indefinitely.
     ///
     /// Backed by JMAP's push channel, with the state cursor held server-side
-    /// here rather than by the subscriber: a reconnect or a missed
-    /// notification is reconciled through `Email/changes`, so the subscription
-    /// reports late rather than losing mail. Only *new* messages are emitted —
+    /// here rather than by the subscriber: upstream reconnects and missed
+    /// notifications are reconciled through `Email/changes` while this request
+    /// remains open. A new subscription starts from now; disconnected
+    /// subscribers must query for mail received during their gap. Only *new* messages are emitted —
     /// flag and folder changes to existing mail are not arrivals.
     ///
     /// Transient failures are retried internally and never reach the
     /// subscriber. The stream ends only when the token stops authenticating.
     ///
     /// Set `full` to select body and attachment fields. Unlike a query, a
-    /// subscription has no request boundary at which the batching loaders
-    /// reset, so leaving it off and selecting `textBody` anyway resolves each
-    /// email through a loader that lives as long as the subscription.
+    /// subscription disables record caching so lazily fetched bodies and
+    /// nested records cannot accumulate over the connection's lifetime.
     async fn emails(
         &self,
         ctx: &Context<'_>,
@@ -58,6 +58,16 @@ impl SubscriptionRoot {
         poll_seconds: Option<u64>,
     ) -> Result<impl Stream<Item = Result<GqlEmail>> + use<>> {
         let client = ctx.data::<SharedClient>()?.clone();
+        ctx.data::<super::loaders::Emails>()?
+            .enable_all_cache(false);
+        ctx.data::<super::loaders::Mailboxes>()?
+            .enable_all_cache(false);
+        ctx.data::<super::loaders::Identities>()?
+            .enable_all_cache(false);
+        ctx.data::<super::loaders::MaskedEmails>()?
+            .enable_all_cache(false);
+        ctx.data::<super::loaders::Threads>()?
+            .enable_all_cache(false);
 
         let watcher = ArrivalWatcher::new(
             client,

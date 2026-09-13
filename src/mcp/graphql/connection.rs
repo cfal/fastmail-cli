@@ -293,8 +293,18 @@ pub async fn emails_connection(
     // Selecting nothing but `totalCount` should not fetch a single email; and
     // `totalCount` is the only thing that makes the server compute the total.
     let wants_total = ctx.look_ahead().field("totalCount").exists();
-    let wants_nodes =
-        ctx.look_ahead().field("edges").exists() || ctx.look_ahead().field("nodes").exists();
+    let wants_nodes = ctx.look_ahead().field("edges").exists()
+        || ctx.look_ahead().field("nodes").exists()
+        || ctx
+            .look_ahead()
+            .field("pageInfo")
+            .field("startCursor")
+            .exists()
+        || ctx
+            .look_ahead()
+            .field("pageInfo")
+            .field("endCursor")
+            .exists();
 
     query(
         args.after,

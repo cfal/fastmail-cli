@@ -552,13 +552,16 @@ curl -N http://127.0.0.1:8080/graphql/stream \
   -d '{"query":"subscription { emails(mailbox: \"inbox\") { id subject from { email } } }"}'
 ```
 
-SSE rather than WebSockets because the only subscription is a server-to-client
-firehose: nothing is ever sent back up the socket, and SSE reconnects on its
-own. Body fields (`textBody`, `attachments`) want `full: true` — a subscription
-has no request boundary at which the batching loaders reset, so the lazy path
-resolves through a loader that lives as long as the subscription. `pollSeconds`
-is the same fallback as the CLI's `--poll`. MCP has no equivalent: tools are
-request/response, and a subscription never returns.
+The stream is not resumable: `Last-Event-ID` is not supported, and a new POST
+starts watching from the current Fastmail state. Query for mail received during
+a subscriber disconnect before starting a new subscription. Upstream Fastmail
+reconnects are reconciled while the subscriber request stays open.
+
+Use `full: true` to fetch body and attachment fields with each arrival. Lazy
+fields also work; subscription record caches are disabled so records do not
+accumulate for the connection lifetime. `pollSeconds` is the same fallback as
+the CLI's `--poll`; both require an interval of at least one second. MCP has no
+equivalent: tools are request/response, and a subscription never returns.
 
 **The HTTP server uses its own configured Fastmail credentials.** It no longer
 accepts `X-Fastmail-Token`, `X-Fastmail-Username`, or `X-Fastmail-App-Password`
