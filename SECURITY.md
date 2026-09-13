@@ -30,7 +30,9 @@ HTTP JSON requests are limited to 2 MiB; attachment uploads and buffered upstrea
 responses to 64 MiB. Image decoding is limited to 16,384 pixels per dimension
 and a 128 MiB allocation budget. SSE frames are limited to 1 MiB. GraphQL has a
 depth limit of 15 and a complexity budget of 100,000; reduce page sizes for
-attachment-heavy queries. These are not a sandbox or global memory quota.
+attachment-heavy queries. Before parsing, query documents are limited to 64 KiB
+and 32 levels of syntax nesting, including input values. Use variables for large
+message bodies. These are not a sandbox or global memory quota.
 Untrusted document parsing can still consume substantial CPU/memory. Prefer a
 dedicated unprivileged account/container with OS resource limits for a shared
 service. Extraction disables disk caching and OCR and requests a 60-second

@@ -7,6 +7,7 @@ use async_graphql::Schema;
 
 pub mod connection;
 pub mod filter;
+mod input_limits;
 pub mod loaders;
 mod mutation;
 mod query;
@@ -14,6 +15,7 @@ mod subscription;
 #[cfg(test)]
 mod tests;
 pub mod types;
+pub(super) use input_limits::check_query;
 
 use mutation::MutationRoot;
 use query::QueryRoot;
@@ -101,6 +103,7 @@ pub(crate) const MAX_COMPLEXITY: usize = 100_000;
 /// because send preview→confirm spans two separate requests.
 pub fn build_schema() -> FastmailSchema {
     Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
+        .extension(input_limits::InputLimits)
         .data(types::NonceStore::default())
         .limit_depth(MAX_DEPTH)
         .limit_complexity(MAX_COMPLEXITY)

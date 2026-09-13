@@ -206,6 +206,9 @@ so check `session { carddavConfigured }` first), identities, moveEmail,
 markAsRead, markAsSpam, and the remaining filter and sort options."
     )]
     async fn graphql(&self, Parameters(req): Parameters<GraphqlRequest>) -> ToolResult {
+        if let Err(message) = graphql::check_query(&req.query) {
+            return Self::error_result(message);
+        }
         let Some(token) = self.default_token.as_deref() else {
             return Self::error_result(
                 "No Fastmail token available. Configure one on the server via `fastmail auth`.",
@@ -355,6 +358,9 @@ async fn graphiql_asset(
 fn is_introspection_only(query: &str) -> bool {
     use async_graphql::parser::types::Selection;
 
+    if graphql::check_query(query).is_err() {
+        return false;
+    }
     let Ok(doc) = async_graphql::parser::parse_query(query) else {
         return false;
     };
@@ -382,6 +388,7 @@ async fn build_http_request(
     mcp: &FastmailMcp,
     req: HttpGraphqlRequest,
 ) -> std::result::Result<async_graphql::Request, String> {
+    graphql::check_query(&req.query)?;
     // Introspection is answered from the schema, so it neither needs a token nor
     // touches the network — the IDE stays usable while credentials are wrong.
     let mut request = if is_introspection_only(&req.query) {
@@ -563,6 +570,32 @@ fn http_router(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn graphql_transports_check_syntax_before_authentication() {
+        let mcp = FastmailMcp::build(None);
+        let query = "[".repeat(33);
+        let error = build_http_request(
+            &mcp,
+            HttpGraphqlRequest {
+                query: query.clone(),
+                variables: None,
+                operation_name: None,
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("syntax nesting"));
+        let result = mcp
+            .graphql(Parameters(GraphqlRequest {
+                query,
+                variables: None,
+            }))
+            .await
+            .unwrap();
+        assert!(text_of(result).contains("syntax nesting"));
+    }
 
     #[tokio::test]
     async fn http_auth_and_browser_policy_cover_every_surface() {
