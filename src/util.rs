@@ -32,12 +32,12 @@ pub fn parse_addresses(input: &str) -> Vec<EmailAddress> {
 
 // ============ Text Extraction ============
 
-/// Extract text from attachment data using kreuzberg
+/// Extract text from attachment data using xberg
 /// Supports: PDF, DOC, DOCX, ODT, XLSX, XLS, ODS, PPTX, PPT, EPUB, RTF,
 /// HTML, XML, JSON, YAML, CSV, TSV, TXT, MD, EML, MSG, and more
 /// NOTE: Returns None for images - use existing image pipeline instead
 pub async fn extract_text(bytes: &[u8], filename: &str) -> anyhow::Result<Option<String>> {
-    use kreuzberg::{ExtractionConfig, extract_bytes};
+    use xberg::{ExtractInput, ExtractionConfig, extract};
 
     // Skip images - we have our own pipeline for those (resize + send to Claude)
     if is_image_extension(filename) {
@@ -45,25 +45,36 @@ pub async fn extract_text(bytes: &[u8], filename: &str) -> anyhow::Result<Option
     }
 
     let mime_type = mime_from_filename(filename);
-    let config = ExtractionConfig::default();
-
-    match extract_bytes(bytes, &mime_type, &config).await {
+    let config = ExtractionConfig {
+        use_cache: false,
+        disable_ocr: true,
+        extraction_timeout_secs: Some(60),
+        ..Default::default()
+    };
+    let input = ExtractInput::from_bytes(bytes.to_vec(), &mime_type, None);
+    match extract(input, &config).await {
         Ok(result) => {
-            let content = result.content.trim();
+            let content = result
+                .results
+                .iter()
+                .map(|r| r.content.trim())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
             if content.is_empty() {
                 Ok(None)
             } else {
-                Ok(Some(content.to_string()))
+                Ok(Some(content))
             }
         }
         Err(e) => {
-            tracing::debug!("kreuzberg extraction failed for {}: {}", filename, e);
+            tracing::debug!("xberg extraction failed for {}: {}", filename, e);
             Ok(None)
         }
     }
 }
 
-/// Check if filename has an image extension (used to skip kreuzberg for images)
+/// Check if filename has an image extension (used to skip xberg for images)
 fn is_image_extension(filename: &str) -> bool {
     let ext = Path::new(filename)
         .extension()
@@ -142,7 +153,7 @@ pub fn mime_from_filename(filename: &str) -> String {
         "pod" => "text/x-pod",
         "mdoc" => "text/troff",
         "troff" => "text/troff",
-        // Default - let kreuzberg figure it out
+        // Default - let xberg figure it out
         _ => "application/octet-stream",
     }
     .to_string()
