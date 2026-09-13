@@ -5,9 +5,10 @@ import { createClient } from 'graphql-sse';
 export function createFetcher(fetchFn = globalThis.fetch) {
   const http = createGraphiQLFetcher({ url: '/graphql', fetch: fetchFn });
   return (params, options = {}) => {
-    const document = options.documentAST || parse(params.query);
-    if (getOperationAST(document, params.operationName)?.operation !== 'subscription') {
-      return http(params, options);
+    // GraphiQL's debounced editor analysis can lag behind the submitted query.
+    const documentAST = parse(params.query);
+    if (getOperationAST(documentAST, params.operationName)?.operation !== 'subscription') {
+      return http(params, { ...options, documentAST });
     }
     const client = createClient({
       url: '/graphql/stream',

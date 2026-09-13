@@ -40,6 +40,30 @@ test('subscriptions deliver streamed results and finish without reconnecting', a
   assert.equal(count, 1);
 });
 
+test('routing uses the submitted query when editor analysis is stale', async () => {
+  const requests = [];
+  const fetcher = createFetcher(async (url) => {
+    requests.push(url);
+    if (url === '/graphql/stream') {
+      return new Response('event: next\ndata: {"data":{"emails":{"id":"e0"}}}\n\nevent: complete\ndata:\n\n', {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    }
+    return Response.json({ data: { __typename: 'QueryRoot' } });
+  });
+  const query = '{ __typename }';
+  const subscription = 'subscription { emails { id } }';
+  for (const [submitted, stale] of [[subscription, query], [query, subscription]]) {
+    const result = await fetcher({ query: submitted }, { documentAST: parse(stale) });
+    if (result[Symbol.asyncIterator]) {
+      for await (const value of result) assert.ok(value.data);
+    } else {
+      assert.ok(result.data);
+    }
+  }
+  assert.deepEqual(requests, ['/graphql/stream', '/graphql']);
+});
+
 test('stopping a subscription aborts its request', async () => {
   let signal;
   const fetcher = createFetcher(async (_url, options) => {
