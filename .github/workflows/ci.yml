@@ -84,6 +84,7 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm audit
+          npm test
           npm run build
           git diff --exit-code -- dist
           test -z "$(git ls-files --others --exclude-standard -- dist)"
@@ -95,9 +96,12 @@ jobs:
           echo "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be  $RUNNER_TEMP/osv-scanner" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/osv-scanner"
           "$RUNNER_TEMP/osv-scanner" scan source --lockfile Cargo.lock
+          command -v rg >/dev/null
           if rg 'LruCache' src; then
             echo 'Reassess the lru advisory exception before using LruCache.'
             exit 1
+          else
+            test "$?" -eq 1
           fi
 
   # Is Cargo.toml's version ahead of what's actually been shipped? Releases are
