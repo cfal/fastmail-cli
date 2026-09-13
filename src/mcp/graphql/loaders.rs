@@ -137,9 +137,8 @@ impl Loader<String> for BlobLoader {
     }
 }
 
-/// Cap on IDs per `Email/get`. JMAP servers bound how many records one call may
-/// request; this stays well inside Fastmail's limit while still collapsing a
-/// full page of list results into one round trip.
+/// Dispatch threshold for batching. The JMAP client splits actual calls at
+/// the session's object limit, including a single large `load_many` request.
 const EMAIL_BATCH: usize = 100;
 
 /// Cap on concurrent blob downloads. Attachments are large and are held in

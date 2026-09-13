@@ -84,7 +84,6 @@ pub struct JmapClient {
     session_url: String,
     session: Option<Session>,
     available_capabilities: Vec<String>,
-    cached_mailboxes: Option<Vec<Mailbox>>,
     server: Option<crate::remote::HttpServer>,
 }
 
@@ -604,7 +603,6 @@ impl JmapClient {
             session_url: SESSION_URL.to_string(),
             session: None,
             available_capabilities: Vec::new(),
-            cached_mailboxes: None,
             server: None,
         }
     }
@@ -819,19 +817,10 @@ impl JmapClient {
         Ok(resp.list)
     }
 
-    /// Mailbox list, memoised for the life of this client.
-    ///
-    /// For the CLI, where the process is short-lived and several commands walk
-    /// the folder tree in one run. Long-lived callers want
-    /// [`Self::fetch_mailboxes`] instead.
+    /// Fetch current mailbox names and roles, including on pooled server clients.
     #[instrument(skip(self))]
     pub async fn list_mailboxes(&mut self) -> Result<Vec<Mailbox>> {
-        if let Some(ref cached) = self.cached_mailboxes {
-            return Ok(cached.clone());
-        }
-        let mailboxes = self.fetch_mailboxes().await?;
-        self.cached_mailboxes = Some(mailboxes.clone());
-        Ok(mailboxes)
+        self.fetch_mailboxes().await
     }
 
     pub async fn find_mailbox(&mut self, name: &str) -> Result<Mailbox> {
@@ -877,11 +866,13 @@ impl JmapClient {
         }
 
         let mut method_calls = vec![json!(["Email/query", args, "q0"])];
+        let chained_get =
+            query.fetch_summaries && query.limit as usize <= self.max_objects_in_get();
 
         // Chain the summary fetch off the query with a JMAP back-reference, so a
         // page costs one HTTP round trip rather than two. Skipped entirely when
         // the caller only wants counts.
-        if query.fetch_summaries {
+        if chained_get {
             method_calls.push(json!([
                 "Email/get",
                 {
@@ -904,15 +895,19 @@ impl JmapClient {
 
         let mut emails = Vec::new();
         if query.fetch_summaries {
-            let get_resp: GetResponse<Email> =
-                Self::parse_response(responses.get(1).unwrap_or(&Value::Null), "Email/get")?;
+            let records = if chained_get {
+                Self::parse_response::<GetResponse<Email>>(
+                    responses.get(1).unwrap_or(&Value::Null),
+                    "Email/get",
+                )?
+                .list
+            } else {
+                self.get_email_summaries(&query_resp.ids).await?
+            };
             // `Email/get` makes no ordering guarantee, so restore the sort order
             // the query asked for rather than trusting the response order.
-            let mut by_id: HashMap<&str, Email> = get_resp
-                .list
-                .iter()
-                .map(|e| (e.id.as_str(), e.clone()))
-                .collect();
+            let mut by_id: HashMap<String, Email> =
+                records.into_iter().map(|e| (e.id.clone(), e)).collect();
             emails = query_resp
                 .ids
                 .iter()
@@ -941,7 +936,7 @@ impl JmapClient {
     }
 
     /// Fetch full content — bodies, attachment metadata, threading headers — for
-    /// many emails in a **single** `Email/get` call.
+    /// many emails in `Email/get` batches within the advertised object limit.
     ///
     /// IDs that don't exist are simply absent from the result; the caller decides
     /// whether that is an error. This is the batch primitive behind the GraphQL
@@ -963,6 +958,17 @@ impl JmapClient {
             .await
     }
 
+    fn max_objects_in_get(&self) -> usize {
+        self.session
+            .as_ref()
+            .and_then(|session| session.capabilities.get("urn:ietf:params:jmap:core"))
+            .and_then(|core| core.get("maxObjectsInGet"))
+            .and_then(Value::as_u64)
+            .and_then(|limit| usize::try_from(limit).ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(100)
+    }
+
     async fn get_email_records(
         &self,
         ids: &[String],
@@ -974,24 +980,28 @@ impl JmapClient {
         }
         let account_id = self.account_id()?;
 
-        let responses = self
-            .request(vec![json!([
-                "Email/get",
-                {
-                    "accountId": account_id,
-                    "ids": ids,
-                    "properties": properties,
-                    "fetchTextBodyValues": fetch_bodies,
-                    "fetchHTMLBodyValues": fetch_bodies
-                },
-                "g0"
-            ])])
-            .await?;
+        let mut emails = Vec::new();
+        for ids in ids.chunks(self.max_objects_in_get()) {
+            let responses = self
+                .request(vec![json!([
+                    "Email/get",
+                    {
+                        "accountId": account_id,
+                        "ids": ids,
+                        "properties": properties,
+                        "fetchTextBodyValues": fetch_bodies,
+                        "fetchHTMLBodyValues": fetch_bodies
+                    },
+                    "g0"
+                ])])
+                .await?;
 
-        let resp: GetResponse<Email> =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
+            let resp: GetResponse<Email> =
+                Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
 
-        Ok(resp.list)
+            emails.extend(resp.list);
+        }
+        Ok(emails)
     }
 
     /// The account's current `Email` state string: the cursor
@@ -1160,7 +1170,7 @@ impl JmapClient {
             .ok_or_else(|| Error::EmailNotFound(email_id.into()))
     }
 
-    /// Resolve thread IDs to their member email IDs in a single `Thread/get`.
+    /// Resolve thread IDs in batches within the advertised object limit.
     ///
     /// Threads that don't exist are absent from the map. This is the batch
     /// primitive behind the GraphQL thread DataLoader.
@@ -1174,28 +1184,32 @@ impl JmapClient {
         }
         let account_id = self.account_id()?;
 
-        let responses = self
-            .request(vec![json!([
-                "Thread/get",
-                {
-                    "accountId": account_id,
-                    "ids": thread_ids
-                },
-                "t0"
-            ])])
-            .await?;
+        let mut threads = HashMap::new();
+        for thread_ids in thread_ids.chunks(self.max_objects_in_get()) {
+            let responses = self
+                .request(vec![json!([
+                    "Thread/get",
+                    {
+                        "accountId": account_id,
+                        "ids": thread_ids
+                    },
+                    "t0"
+                ])])
+                .await?;
 
-        #[derive(Deserialize)]
-        struct Thread {
-            id: String,
-            #[serde(rename = "emailIds")]
-            email_ids: Vec<String>,
+            #[derive(Deserialize)]
+            struct Thread {
+                id: String,
+                #[serde(rename = "emailIds")]
+                email_ids: Vec<String>,
+            }
+
+            let resp: GetResponse<Thread> =
+                Self::parse_response(responses.first().unwrap_or(&Value::Null), "Thread/get")?;
+
+            threads.extend(resp.list.into_iter().map(|t| (t.id, t.email_ids)));
         }
-
-        let resp: GetResponse<Thread> =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Thread/get")?;
-
-        Ok(resp.list.into_iter().map(|t| (t.id, t.email_ids)).collect())
+        Ok(threads)
     }
 
     /// Get all emails in a thread, with full content.
@@ -2377,6 +2391,79 @@ mod tests {
     /// One `methodResponses` envelope around a single method result.
     pub(super) fn jmap_response(method: &str, result: serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "methodResponses": [[method, result, "c0"]] })
+    }
+
+    #[tokio::test]
+    async fn email_thread_and_query_fetches_respect_the_session_object_limit() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let calls = body["methodCalls"].as_array().unwrap();
+            assert_eq!(calls.len(), 1);
+            let call = &calls[0];
+            let result = if call[0] == "Email/query" {
+                json!({"ids": ["e0", "e1", "e2", "e3", "e4"], "position": 0, "queryState":"q1"})
+            } else {
+                let ids = call[1]["ids"].as_array().unwrap();
+                assert!(ids.len() <= 2);
+                json!({"list": ids.iter().map(|id| json!({"id":id, "threadId":"t0", "emailIds":["e0", "e1", "e2", "e3", "e4"]})).collect::<Vec<_>>(), "notFound": []})
+            };
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[call[0], result, call[2]]]}))
+        }).mount(&server).await;
+        let mut client = mock_client(&server.uri());
+        client.session.as_mut().unwrap().capabilities.insert(
+            "urn:ietf:params:jmap:core".into(),
+            json!({"maxObjectsInGet":2}),
+        );
+        let ids = (0..5).map(|n| format!("e{n}")).collect::<Vec<_>>();
+        assert_eq!(client.get_emails(&ids).await.unwrap().len(), 5);
+        assert_eq!(client.get_email_summaries(&ids).await.unwrap().len(), 5);
+        assert_eq!(client.thread_email_ids(&ids).await.unwrap().len(), 5);
+        assert_eq!(client.get_thread("e0").await.unwrap().len(), 5);
+        let page = client.query_emails(EmailQuery::first(5)).await.unwrap();
+        assert_eq!(
+            page.emails.iter().map(|e| &e.id).collect::<Vec<_>>(),
+            ids.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn missing_or_invalid_object_limit_uses_a_nonzero_fallback() {
+        let mut client = mock_client("https://example.test");
+        for value in [Value::Null, json!(0), json!("invalid")] {
+            client.session.as_mut().unwrap().capabilities.insert(
+                "urn:ietf:params:jmap:core".into(),
+                json!({"maxObjectsInGet":value}),
+            );
+            assert_eq!(client.max_objects_in_get(), 100);
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_resolution_refreshes_names_and_roles() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Mailbox/get",
+                json!({"list":[{"id":"new", "name":"Renamed", "role":"sent"}]}),
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Mailbox/get",
+                json!({"list":[{"id":"old", "name":"Original", "role":"sent"}]}),
+            )))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let mut client = mock_client(&server.uri());
+        assert_eq!(client.find_mailbox("sent").await.unwrap().id, "old");
+        assert_eq!(client.find_mailbox("sent").await.unwrap().id, "new");
+        assert_eq!(client.find_mailbox("renamed").await.unwrap().id, "new");
     }
 
     #[tokio::test]
