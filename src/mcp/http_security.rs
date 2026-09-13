@@ -16,7 +16,7 @@ use subtle::ConstantTimeEq;
 
 pub(crate) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
 
-async fn bounded_body(request: Request, limit: usize) -> Result<Request, Response> {
+async fn bounded_body(request: Request, limit: usize) -> Result<Request, StatusCode> {
     use std::error::Error as _;
     let (parts, body) = request.into_parts();
     match axum::body::to_bytes(body, limit).await {
@@ -30,7 +30,7 @@ async fn bounded_body(request: Request, limit: usize) -> Result<Request, Respons
             } else {
                 StatusCode::BAD_REQUEST
             };
-            Err((status, "Cannot read request within the body limit").into_response())
+            Err(status)
         }
     }
 }
@@ -39,7 +39,7 @@ pub(super) async fn limit_mcp_body(request: Request, next: Next) -> Response {
     // rmcp collects raw bodies and does not use Axum's limited JSON extractor.
     match bounded_body(request, MAX_JSON_BODY_BYTES).await {
         Ok(request) => next.run(request).await,
-        Err(response) => response,
+        Err(status) => (status, "Cannot read request within the body limit").into_response(),
     }
 }
 
@@ -269,7 +269,7 @@ mod tests {
             .body(Body::from("abcdefghijklmnopq"))
             .unwrap();
         assert_eq!(
-            bounded_body(sized, 16).await.unwrap_err().status(),
+            bounded_body(sized, 16).await.unwrap_err(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
         let chunks = async_graphql::futures_util::stream::iter([
@@ -279,7 +279,7 @@ mod tests {
         ]);
         let streamed = Request::new(Body::from_stream(chunks));
         assert_eq!(
-            bounded_body(streamed, 16).await.unwrap_err().status(),
+            bounded_body(streamed, 16).await.unwrap_err(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
         let accepted = bounded_body(Request::new(Body::from("abcdefghijklmnop")), 16)
