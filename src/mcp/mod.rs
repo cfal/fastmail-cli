@@ -532,6 +532,7 @@ fn http_router(
 
     let mut router = axum::Router::new()
         .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(http_security::limit_mcp_body))
         .merge(cli_http::router());
 
     if surfaces.graphql || surfaces.graphiql {

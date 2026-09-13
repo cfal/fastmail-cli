@@ -14,6 +14,35 @@ use http::{HeaderMap, StatusCode, header, uri::Authority};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+pub(crate) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+async fn bounded_body(request: Request, limit: usize) -> Result<Request, Response> {
+    use std::error::Error as _;
+    let (parts, body) = request.into_parts();
+    match axum::body::to_bytes(body, limit).await {
+        Ok(bytes) => Ok(Request::from_parts(parts, axum::body::Body::from(bytes))),
+        Err(error) => {
+            let status = if error
+                .source()
+                .is_some_and(|e| e.is::<http_body_util::LengthLimitError>())
+            {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            Err((status, "Cannot read request within the body limit").into_response())
+        }
+    }
+}
+
+pub(super) async fn limit_mcp_body(request: Request, next: Next) -> Response {
+    // rmcp collects raw bodies and does not use Axum's limited JSON extractor.
+    match bounded_body(request, MAX_JSON_BODY_BYTES).await {
+        Ok(request) => next.run(request).await,
+        Err(response) => response,
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct BasicAuth {
     users: HashMap<String, [u8; 32]>,
@@ -231,6 +260,38 @@ pub async fn guard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn body_limit_covers_sized_and_streamed_input() {
+        use axum::body::{Body, Bytes};
+        let sized = Request::builder()
+            .header("Content-Length", "17")
+            .body(Body::from("abcdefghijklmnopq"))
+            .unwrap();
+        assert_eq!(
+            bounded_body(sized, 16).await.unwrap_err().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let chunks = async_graphql::futures_util::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"abcdefgh")),
+            Ok(Bytes::from_static(b"ijklmnop")),
+            Ok(Bytes::from_static(b"q")),
+        ]);
+        let streamed = Request::new(Body::from_stream(chunks));
+        assert_eq!(
+            bounded_body(streamed, 16).await.unwrap_err().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let accepted = bounded_body(Request::new(Body::from("abcdefghijklmnop")), 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            axum::body::to_bytes(accepted.into_body(), 16)
+                .await
+                .unwrap(),
+            "abcdefghijklmnop"
+        );
+    }
 
     #[test]
     fn ipv6_loopback_is_an_allowed_host() {
