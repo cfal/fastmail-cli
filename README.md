@@ -530,31 +530,42 @@ resolves through a loader that lives as long as the subscription. `pollSeconds`
 is the same fallback as the CLI's `--poll`. MCP has no equivalent: tools are
 request/response, and a subscription never returns.
 
-**Credential resolution is the same everywhere:** the request's own header
-wins, otherwise the local config (or the matching environment variable) is used.
-Running it yourself, that means your own credentials with no ceremony. In a
-hosted deployment there is no local config, so the fallback is absent and every
-request must carry its headers, injected by a trusted upstream after it has
-authenticated the caller. Authenticated JMAP clients are cached per token, so
-the JMAP session handshake runs once per distinct token rather than per call.
+**The HTTP server uses its own configured Fastmail credentials.** It no longer
+accepts `X-Fastmail-Token`, `X-Fastmail-Username`, or `X-Fastmail-App-Password`
+overrides. Configure `FASTMAIL_API_TOKEN` (or `fastmail auth`) on the server,
+plus `FASTMAIL_USERNAME` and `FASTMAIL_APP_PASSWORD` for contacts.
 
-| Header                     | Falls back to           | Needed for              |
-| -------------------------- | ----------------------- | ----------------------- |
-| `X-Fastmail-Token`         | `FASTMAIL_API_TOKEN`    | everything over JMAP    |
-| `X-Fastmail-Username`      | `FASTMAIL_USERNAME`     | contacts (CardDAV)      |
-| `X-Fastmail-App-Password`  | `FASTMAIL_APP_PASSWORD` | contacts (CardDAV)      |
+HTTP authentication is optional, including on non-loopback listeners. Without
+it, anyone who can reach the server can use the configured account. Choose the
+listener address, firewall and reverse-proxy policy accordingly.
 
-Contacts take two headers rather than riding on the token because CardDAV is a
-separate protocol that rejects API tokens outright. Each resolves on its own: a
-request carrying a username header but no password gets exactly that — half a
-credential, which `session { carddavConfigured }` reports as `false` — rather
-than quietly completing itself from the host's local config and mixing two
-users together.
+To enable Basic authentication, pass a TOML password file:
 
-Do **not** expose this to the internet without such an auth layer in front —
-the header is trusted unconditionally. Equally, do not run it with local
-credentials present on a non-loopback address: anything that can reach the port
-gets your mailbox without needing a token at all.
+```toml
+[users]
+alice = "replace-with-a-long-unique-password"
+bob = "replace-with-a-different-password"
+```
+
+```bash
+chmod 600 users.toml
+fastmail mcp --http 0.0.0.0:8080 --graphql --auth-file users.toml
+curl --user alice http://127.0.0.1:8080/graphql \
+  -H 'Content-Type: application/json' -d '{"query":"{ session { status } }"}'
+```
+
+These usernames identify HTTP clients, not Fastmail accounts: all authorized
+users access the same server-owned mailbox and contacts. The file is read at
+startup; restart the server after changing it. Empty or invalid files fail
+closed. Passwords are stored in plaintext in the file, so keep it private and
+out of version control. Basic auth is not encryption: use HTTPS through a
+reverse proxy for remote access.
+
+Host and same-origin checks cover every HTTP endpoint, with or without auth.
+Loopback listeners accept loopback hosts by default. Non-loopback listeners
+accept arbitrary hosts unless restricted with repeated `--allowed-host HOST`
+options (hostnames without ports). Set your public hostname when using a proxy,
+and preserve the original `Host` header. Cross-origin browser access is rejected.
 
 The token is resolved on first query rather than at startup, so an expired one
 shows up as an error in the response pane rather than a server that won't boot —

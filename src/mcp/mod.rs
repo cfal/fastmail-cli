@@ -8,12 +8,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler,
+    ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
-    schemars,
-    service::RequestContext,
-    tool, tool_handler, tool_router,
+    schemars, tool, tool_handler, tool_router,
 };
 use tokio::sync::Mutex;
 
@@ -23,24 +21,10 @@ use crate::jmap::JmapClient;
 type ToolResult = std::result::Result<CallToolResult, McpError>;
 
 pub mod graphql;
+mod http_security;
 mod sdl;
 
 use graphql::{CardDavCreds, FastmailSchema, SharedClient};
-
-/// Header carrying the per-request Fastmail API token in HTTP transport mode.
-/// A trusted upstream (the hosted service, after authenticating the user) sets
-/// this before proxying the request. Over stdio it is absent and the config
-/// token is used instead.
-pub const TOKEN_HEADER: &str = "x-fastmail-token";
-
-/// Headers carrying the per-request CardDAV credentials, set by the same
-/// trusted upstream as [`TOKEN_HEADER`].
-///
-/// Separate from the token because CardDAV is a separate protocol that rejects
-/// API tokens outright — one bearer value cannot cover both, which is why the
-/// gateway declares three credential fields for this backend rather than one.
-pub const USERNAME_HEADER: &str = "x-fastmail-username";
-pub const APP_PASSWORD_HEADER: &str = "x-fastmail-app-password";
 
 /// Cache of authenticated JMAP clients keyed by Fastmail token, so we don't
 /// re-run the JMAP session handshake on every tool call. Shared across sessions.
@@ -67,42 +51,7 @@ async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedCl
         .clone())
 }
 
-/// Prefer the per-request `X-Fastmail-Token` header (HTTP), else fall back to
-/// the configured default. Pure so it can be unit-tested without a live
-/// [`RequestContext`].
-fn resolve_token(headers: Option<&http::HeaderMap>, default: Option<&str>) -> Option<String> {
-    header_value(headers, TOKEN_HEADER).or_else(|| default.map(str::to_owned))
-}
-
-fn header_value(headers: Option<&http::HeaderMap>, name: &str) -> Option<String> {
-    headers
-        .and_then(|h| h.get(name))
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
-}
-
-/// Per-request CardDAV credentials, resolved like [`resolve_token`]: the
-/// request's own headers first, then whatever local config supplied.
-///
-/// Each half falls back independently. A deployment that stores a username but
-/// no app password should get exactly that — half-configured, which
-/// `carddavConfigured` reports as false — rather than silently mixing one
-/// user's header with another's local default.
-fn resolve_carddav(headers: Option<&http::HeaderMap>, default: &CardDavCreds) -> CardDavCreds {
-    CardDavCreds {
-        username: header_value(headers, USERNAME_HEADER).or_else(|| default.username.clone()),
-        app_password: header_value(headers, APP_PASSWORD_HEADER)
-            .or_else(|| default.app_password.clone()),
-    }
-}
-
-/// The Fastmail token to use when no request header supplies one: the local
-/// config or `FASTMAIL_API_TOKEN`, if either is present.
-///
-/// Best-effort by design. A hosted deployment ships neither, so this is `None`
-/// there and every request must carry its own header — while running locally
-/// picks up your credentials without ceremony.
+/// Server-owned Fastmail credentials, resolved independently of HTTP login.
 fn local_token() -> Option<String> {
     Config::load().ok().and_then(|c| c.get_token().ok())
 }
@@ -133,13 +82,9 @@ pub struct SchemaRequest {
 pub struct FastmailMcp {
     schema: Arc<FastmailSchema>,
     clients: ClientCache,
-    /// Token used when a request carries no [`TOKEN_HEADER`]. Always set over
-    /// stdio; over HTTP it is whatever [`local_token`] found, so `None` in a
-    /// hosted deployment and every request must bring its own.
+    /// Fastmail token configured on the machine running the server.
     default_token: Option<String>,
-    /// CardDAV credentials used when a request carries no credential headers.
-    /// Exactly `default_token`'s counterpart: your own config over stdio,
-    /// nothing in a hosted deployment.
+    /// CardDAV credentials configured on the machine running the server.
     default_carddav: CardDavCreds,
     #[allow(dead_code)] // referenced by #[tool_handler] macro expansion
     tool_router: ToolRouter<Self>,
@@ -164,29 +109,9 @@ impl FastmailMcp {
         Ok(Self::build(Some(token)))
     }
 
-    /// Construct for HTTP use. A request's own [`TOKEN_HEADER`] always wins;
-    /// [`local_token`] is the fallback, which exists when you run this yourself
-    /// and not in a hosted deployment.
+    /// Construct for HTTP use with server-owned credentials.
     pub fn http() -> Self {
         Self::build(local_token())
-    }
-
-    /// Resolve the Fastmail token for this request: the per-request header if
-    /// present (HTTP), otherwise the configured default (stdio).
-    fn resolve_token(&self, ctx: &RequestContext<RoleServer>) -> Option<String> {
-        resolve_token(Self::headers(ctx), self.default_token.as_deref())
-    }
-
-    /// CardDAV credentials for this request — headers first, local config after.
-    fn resolve_carddav(&self, ctx: &RequestContext<RoleServer>) -> CardDavCreds {
-        resolve_carddav(Self::headers(ctx), &self.default_carddav)
-    }
-
-    /// The HTTP headers behind this request, absent over stdio.
-    fn headers(ctx: &RequestContext<RoleServer>) -> Option<&http::HeaderMap> {
-        ctx.extensions
-            .get::<http::request::Parts>()
-            .map(|p| &p.headers)
     }
 
     fn text_result(text: impl Into<String>) -> ToolResult {
@@ -276,23 +201,18 @@ payloads (base64/image/text), masked email, contacts and contact CRUD (CardDAV,
 so check `session { carddavConfigured }` first), identities, moveEmail,
 markAsRead, markAsSpam, and the remaining filter and sort options."
     )]
-    async fn graphql(
-        &self,
-        ctx: RequestContext<RoleServer>,
-        Parameters(req): Parameters<GraphqlRequest>,
-    ) -> ToolResult {
-        let Some(token) = self.resolve_token(&ctx) else {
+    async fn graphql(&self, Parameters(req): Parameters<GraphqlRequest>) -> ToolResult {
+        let Some(token) = self.default_token.as_deref() else {
             return Self::error_result(
-                "No Fastmail token available. Configure one via `fastmail auth` \
-                 (stdio) or send the X-Fastmail-Token header (HTTP).",
+                "No Fastmail token available. Configure one on the server via `fastmail auth`.",
             );
         };
-        let client = match client_for(&self.clients, &token).await {
+        let client = match client_for(&self.clients, token).await {
             Ok(client) => client,
             Err(e) => return Self::error_result(format!("Fastmail authentication failed: {e}")),
         };
 
-        let mut request = graphql::request(&req.query, client, self.resolve_carddav(&ctx));
+        let mut request = graphql::request(&req.query, client, self.default_carddav.clone());
 
         if let Some(ref vars) = req.variables {
             match serde_json::from_str::<serde_json::Value>(vars) {
@@ -437,7 +357,6 @@ fn is_introspection_only(query: &str) -> bool {
 /// response body.
 async fn build_http_request(
     mcp: &FastmailMcp,
-    headers: &http::HeaderMap,
     req: HttpGraphqlRequest,
 ) -> std::result::Result<async_graphql::Request, String> {
     // Introspection is answered from the schema, so it neither needs a token nor
@@ -445,26 +364,19 @@ async fn build_http_request(
     let mut request = if is_introspection_only(&req.query) {
         async_graphql::Request::new(&req.query)
     } else {
-        // Must keep honouring `mcp.default_token` here: GraphiQL runs in a
-        // browser and cannot attach the token header, so making this
-        // headers-only breaks local development.
-        let Some(token) = resolve_token(Some(headers), mcp.default_token.as_deref()) else {
-            return Err(format!(
-                "No Fastmail token available. Configure one via `fastmail auth` \
-                 or send the {TOKEN_HEADER} header."
-            ));
+        let Some(token) = mcp.default_token.as_deref() else {
+            return Err(
+                "No Fastmail token available. Configure one on the server via `fastmail auth`."
+                    .into(),
+            );
         };
         // Authenticated on first use rather than at startup, so a missing or
         // expired token surfaces in the response pane instead of stopping the
         // server booting.
-        let client = client_for(&mcp.clients, &token)
+        let client = client_for(&mcp.clients, token)
             .await
             .map_err(|e| format!("Fastmail authentication failed: {e}"))?;
-        graphql::request(
-            &req.query,
-            client,
-            resolve_carddav(Some(headers), &mcp.default_carddav),
-        )
+        graphql::request(&req.query, client, mcp.default_carddav.clone())
     };
     if let Some(vars) = req.variables {
         request = request.variables(async_graphql::Variables::from_json(vars));
@@ -480,10 +392,9 @@ async fn build_http_request(
 /// schema, client cache and token resolution with the `graphql` tool.
 async fn graphql_endpoint(
     axum::extract::State(mcp): axum::extract::State<FastmailMcp>,
-    headers: http::HeaderMap,
     axum::Json(req): axum::Json<HttpGraphqlRequest>,
 ) -> axum::Json<async_graphql::Response> {
-    match build_http_request(&mcp, &headers, req).await {
+    match build_http_request(&mcp, req).await {
         Ok(request) => axum::Json(mcp.schema.execute(request).await),
         Err(msg) => axum::Json(async_graphql::Response::from_errors(vec![
             async_graphql::ServerError::new(msg, None),
@@ -499,13 +410,12 @@ async fn graphql_endpoint(
 /// Fastmail, which keeps one mental model for the whole path.
 async fn graphql_stream_endpoint(
     axum::extract::State(mcp): axum::extract::State<FastmailMcp>,
-    headers: http::HeaderMap,
     axum::Json(req): axum::Json<HttpGraphqlRequest>,
 ) -> axum::response::Response {
     use async_graphql::futures_util::stream::StreamExt;
     use axum::response::{IntoResponse, Sse, sse};
 
-    let request = match build_http_request(&mcp, &headers, req).await {
+    let request = match build_http_request(&mcp, req).await {
         Ok(request) => request,
         Err(msg) => {
             return axum::Json(async_graphql::Response::from_errors(vec![
@@ -542,26 +452,44 @@ pub struct HttpSurfaces {
 /// Run the HTTP server on `addr`: MCP streamable-HTTP at `/mcp`, plus whichever
 /// of [`HttpSurfaces`] is enabled.
 ///
-/// A request's own [`TOKEN_HEADER`] always wins; [`local_token`] is the
-/// fallback. Running this yourself, that means your own credentials with no
-/// ceremony. In a hosted deployment there is no local token, so every request
-/// must carry the header — set by a trusted upstream after authenticating the
-/// caller. Do **not** expose this to the internet without such a layer in
-/// front: the header is trusted unconditionally.
+/// Uses server-owned Fastmail credentials without requiring an HTTP login.
 pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Result<()> {
+    run_http_server_with_auth(addr, surfaces, None, Vec::new()).await
+}
+
+pub async fn run_http_server_with_auth(
+    addr: &str,
+    surfaces: HttpSurfaces,
+    auth_file: Option<&std::path::Path>,
+    allowed_hosts: Vec<String>,
+) -> anyhow::Result<()> {
+    let auth = auth_file.map(http_security::BasicAuth::load).transpose()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let policy = http_security::HttpSecurity::new(listener.local_addr()?, auth, allowed_hosts)?;
+    let router = http_router(FastmailMcp::http(), surfaces, policy)?;
+    tracing::info!("HTTP server listening on http://{addr}");
+
+    if surfaces.browser {
+        let url = format!("http://{addr}/");
+        if let Err(e) = open::that_detached(&url) {
+            tracing::warn!("Could not open a browser at {url}: {e}");
+        }
+    }
+
+    axum::serve(listener, router).await?;
+    Ok(())
+}
+
+fn http_router(
+    mcp: FastmailMcp,
+    surfaces: HttpSurfaces,
+    policy: http_security::HttpSecurity,
+) -> anyhow::Result<axum::Router> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
-    // One shared instance (shared schema + client cache) cloned into each session
-    // and used as the axum state for the GraphQL routes.
-    let mcp = FastmailMcp::http();
-    // Disable rmcp's DNS-rebinding Host allowlist: this transport is designed to
-    // run behind a trusted reverse proxy (see the note above), which forwards an
-    // internal Host (e.g. the service name) that the default allowlist
-    // (localhost/127.0.0.1/::1) would reject with 403. Rebinding protection
-    // guards browsers hitting a localhost MCP directly — irrelevant for a
-    // proxied, non-browser-facing backend; the proxy is the security boundary.
+    // One outer policy protects MCP, GraphQL and the IDE consistently.
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
     let service = StreamableHttpService::new(
         {
@@ -573,7 +501,6 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
     );
 
     let mut router = axum::Router::new().nest_service("/mcp", service);
-    tracing::info!("MCP streamable-HTTP listening on http://{addr}/mcp");
 
     if surfaces.graphql || surfaces.graphiql {
         router = router
@@ -582,8 +509,6 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
                 "/graphql/stream",
                 axum::routing::post(graphql_stream_endpoint),
             );
-        tracing::info!("GraphQL endpoint on http://{addr}/graphql");
-        tracing::info!("GraphQL subscriptions (SSE) on http://{addr}/graphql/stream");
     }
 
     if surfaces.graphiql {
@@ -600,122 +525,133 @@ pub async fn run_http_server(addr: &str, surfaces: HttpSurfaces) -> anyhow::Resu
                 async move { axum::response::Html(ide) }
             }),
         );
-        tracing::info!("GraphiQL IDE on http://{addr}/");
     }
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-
-    // Only once the listener is bound, so the browser cannot beat us to it.
-    if surfaces.browser {
-        let url = format!("http://{addr}/");
-        if let Err(e) = open::that_detached(&url) {
-            tracing::warn!("Could not open a browser at {url}: {e}");
-        }
-    }
-
-    axum::serve(listener, router.with_state(mcp))
-        .await
-        .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
-
-    Ok(())
+    Ok(router
+        .with_state(mcp)
+        .layer(axum::middleware::from_fn_with_state(
+            policy,
+            http_security::guard,
+        )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn headers_with(token: Option<&str>) -> http::HeaderMap {
-        let mut headers = http::HeaderMap::new();
-        if let Some(token) = token {
-            headers.insert(TOKEN_HEADER, token.parse().unwrap());
+    #[tokio::test]
+    async fn http_auth_and_browser_policy_cover_every_surface() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, b"[users]\nalice = 'password'\nbob = 'second'")
+            .unwrap();
+        let auth = http_security::BasicAuth::load(file.path()).unwrap();
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let policy = http_security::HttpSecurity::new(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            Some(auth),
+            vec![],
+        )
+        .unwrap();
+        let router = http_router(
+            FastmailMcp::build(None),
+            HttpSurfaces {
+                graphql: true,
+                graphiql: true,
+                browser: false,
+            },
+            policy,
+        )
+        .unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        for path in ["/", "/mcp", "/graphql", "/graphql/stream"] {
+            let response = client.post(format!("{base}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED, "{path}");
+            assert!(
+                response
+                    .headers()
+                    .contains_key(http::header::WWW_AUTHENTICATE)
+            );
         }
-        headers
-    }
-
-    #[test]
-    fn header_token_wins_over_default() {
-        let headers = headers_with(Some("header-tok"));
-        let got = resolve_token(Some(&headers), Some("default-tok"));
-        assert_eq!(got.as_deref(), Some("header-tok"));
-    }
-
-    #[test]
-    fn falls_back_to_default_when_no_header() {
-        let headers = headers_with(None);
-        let got = resolve_token(Some(&headers), Some("default-tok"));
-        assert_eq!(got.as_deref(), Some("default-tok"));
-    }
-
-    #[test]
-    fn falls_back_to_default_when_no_headers() {
-        // stdio: no HTTP headers in the request context at all.
-        let got = resolve_token(None, Some("default-tok"));
-        assert_eq!(got.as_deref(), Some("default-tok"));
-    }
-
-    fn carddav_headers(username: Option<&str>, app_password: Option<&str>) -> http::HeaderMap {
-        let mut headers = http::HeaderMap::new();
-        if let Some(u) = username {
-            headers.insert(USERNAME_HEADER, u.parse().unwrap());
+        for (user, password, status) in [
+            ("alice", "password", 200),
+            ("bob", "second", 200),
+            ("alice", "second", 401),
+        ] {
+            let response = client
+                .post(format!("{base}/graphql"))
+                .basic_auth(user, Some(password))
+                .json(&serde_json::json!({"query": "{ __typename }"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status);
         }
-        if let Some(p) = app_password {
-            headers.insert(APP_PASSWORD_HEADER, p.parse().unwrap());
+        for (name, value) in [
+            ("host", "rebind.example"),
+            ("origin", "https://evil.example"),
+        ] {
+            let response = client
+                .post(format!("{base}/graphql"))
+                .basic_auth("alice", Some("password"))
+                .header(name, value)
+                .json(&serde_json::json!({"query": "{ __typename }"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
         }
-        headers
+        let response = client
+            .post(format!("{base}/graphql"))
+            .basic_auth("alice", Some("password"))
+            .header("x-fastmail-token", "must-not-be-used")
+            .json(&serde_json::json!({"query": "{ session { status } }"}))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("No Fastmail token available")
+        );
+        task.abort();
+        let _ = task.await;
     }
 
-    fn local_carddav() -> CardDavCreds {
-        CardDavCreds {
-            username: Some("local@example.com".into()),
-            app_password: Some("local-password".into()),
-        }
-    }
-
-    #[test]
-    fn carddav_headers_win_over_local_config() {
-        // The hosted path: the gateway injects one user's credentials, and they
-        // must not be shadowed by whatever the host machine happens to hold.
-        let headers = carddav_headers(Some("hosted@example.com"), Some("hosted-password"));
-        let got = resolve_carddav(Some(&headers), &local_carddav());
-
-        assert_eq!(got.username.as_deref(), Some("hosted@example.com"));
-        assert_eq!(got.app_password.as_deref(), Some("hosted-password"));
-    }
-
-    #[test]
-    fn carddav_falls_back_to_local_config_over_stdio() {
-        let got = resolve_carddav(None, &local_carddav());
-        assert_eq!(got.username.as_deref(), Some("local@example.com"));
-        assert!(got.is_complete());
-    }
-
-    #[test]
-    fn a_hosted_deployment_with_no_carddav_credentials_reports_incomplete() {
-        // No headers, no local config — `contacts` is genuinely unavailable,
-        // and `carddavConfigured` must say so rather than half-claiming it.
-        let got = resolve_carddav(Some(&http::HeaderMap::new()), &CardDavCreds::default());
-        assert!(!got.is_complete());
-        assert!(got.username.is_none() && got.app_password.is_none());
-    }
-
-    #[test]
-    fn each_half_of_the_carddav_credential_falls_back_on_its_own() {
-        // A username header with no password header is half a credential, and
-        // completing it from local config would mix two users together.
-        let headers = carddav_headers(Some("hosted@example.com"), None);
-        let got = resolve_carddav(Some(&headers), &CardDavCreds::default());
-
-        assert_eq!(got.username.as_deref(), Some("hosted@example.com"));
-        assert!(got.app_password.is_none());
-        assert!(!got.is_complete());
-    }
-
-    #[test]
-    fn an_empty_credential_header_is_not_a_credential() {
-        // The gateway skips a field the user left blank, but a proxy that sends
-        // the header empty must not read as "configured".
-        let headers = carddav_headers(Some(""), Some(""));
-        assert!(!resolve_carddav(Some(&headers), &CardDavCreds::default()).is_complete());
+    #[tokio::test]
+    async fn http_auth_is_optional_even_on_a_non_loopback_listener() {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let policy = http_security::HttpSecurity::new(addr, None, vec![]).unwrap();
+        let router = http_router(
+            FastmailMcp::build(None),
+            HttpSurfaces {
+                graphql: true,
+                graphiql: false,
+                browser: false,
+            },
+            policy,
+        )
+        .unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/graphql", addr.port()))
+            .json(&serde_json::json!({"query": "{ __typename }"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert!(response.text().await.unwrap().contains("QueryRoot"));
+        task.abort();
+        let _ = task.await;
     }
 
     /// The text a tool call came back with.
@@ -816,18 +752,6 @@ mod tests {
         assert!(!is_introspection_only("{ this is not graphql"));
     }
 
-    #[test]
-    fn none_when_neither_header_nor_default() {
-        // hosted mode with no upstream-injected token — must refuse.
-        assert_eq!(resolve_token(Some(&headers_with(None)), None), None);
-        assert_eq!(resolve_token(None, None), None);
-    }
-
-    /// GraphiQL runs entirely in the browser, with no way to attach the
-    /// `x-fastmail-token` header, so `/graphql` has to keep honouring the
-    /// locally configured token when a request carries none — otherwise the
-    /// IDE that exists specifically to explore the API without ceremony
-    /// becomes unusable the moment credential resolution changes.
     #[tokio::test]
     async fn graphql_falls_back_to_local_config_when_no_headers() {
         let mcp = FastmailMcp::build(Some("fake-token".to_string()));
@@ -848,12 +772,7 @@ mod tests {
             operation_name: None,
         };
 
-        let response = graphql_endpoint(
-            axum::extract::State(mcp),
-            http::HeaderMap::new(),
-            axum::Json(req),
-        )
-        .await;
+        let response = graphql_endpoint(axum::extract::State(mcp), axum::Json(req)).await;
 
         let body = serde_json::to_string(&response.0).unwrap();
         assert!(

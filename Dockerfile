@@ -1,6 +1,5 @@
 # fastmail-cli as a container. Default command runs the MCP server over HTTP —
-# this is the image the mcp-gateway proxies to as a backend (token per request
-# via X-Fastmail-Token).
+# credentials are configured on the server, with optional Basic auth.
 
 # Selects which stage supplies the binary. Must be declared before the first
 # FROM to be usable in one. `docker build .` compiles from source as it always

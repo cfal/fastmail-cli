@@ -344,9 +344,7 @@ enum Commands {
     /// Run as MCP (Model Context Protocol) server for Claude integration
     Mcp {
         /// Serve MCP over streamable HTTP at /mcp instead of stdio, on this
-        /// address (default 127.0.0.1:8080). The `X-Fastmail-Token` header
-        /// overrides the configured token per request, which is how a hosted
-        /// deployment serves many users.
+        /// address (default 127.0.0.1:8080), using local Fastmail credentials.
         #[arg(
             long,
             value_name = "ADDR",
@@ -354,6 +352,14 @@ enum Commands {
             default_missing_value = DEFAULT_HTTP_ADDR,
         )]
         http: Option<String>,
+
+        /// Optional TOML file containing a [users] username/password table
+        #[arg(long, value_name = "PATH")]
+        auth_file: Option<std::path::PathBuf>,
+
+        /// Allowed HTTP hostname (repeatable, without port)
+        #[arg(long = "allowed-host", value_name = "HOST")]
+        allowed_hosts: Vec<String>,
 
         /// Serve plain GraphQL-over-HTTP at /graphql
         #[arg(long)]
@@ -788,6 +794,8 @@ async fn main() {
 
         Commands::Mcp {
             http,
+            auth_file,
+            allowed_hosts,
             graphql,
             graphiql,
             browser,
@@ -799,9 +807,20 @@ async fn main() {
                 browser,
             };
             // Any HTTP-only surface implies the HTTP transport, at its default address.
-            let addr = http.or_else(|| (surfaces.graphql).then(|| DEFAULT_HTTP_ADDR.to_string()));
+            let addr = http.or_else(|| {
+                (surfaces.graphql || auth_file.is_some() || !allowed_hosts.is_empty())
+                    .then(|| DEFAULT_HTTP_ADDR.to_string())
+            });
             match addr {
-                Some(addr) => mcp::run_http_server(&addr, surfaces).await,
+                Some(addr) => {
+                    mcp::run_http_server_with_auth(
+                        &addr,
+                        surfaces,
+                        auth_file.as_deref(),
+                        allowed_hosts,
+                    )
+                    .await
+                }
                 None => mcp::run_server().await,
             }
         }
