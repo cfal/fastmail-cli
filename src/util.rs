@@ -163,25 +163,22 @@ pub fn mime_from_filename(filename: &str) -> String {
 // ============ Image Processing ============
 
 /// Parse a human-readable size string like "500K", "1M", "1.5MB" into bytes
-pub fn parse_size(s: &str) -> Option<usize> {
-    let s = s.trim().to_uppercase();
-    let s = s.trim_end_matches('B'); // "1MB" -> "1M"
-
-    if let Some(num_str) = s.strip_suffix('K') {
-        num_str.parse::<f64>().ok().map(|n| (n * 1024.0) as usize)
-    } else if let Some(num_str) = s.strip_suffix('M') {
-        num_str
-            .parse::<f64>()
-            .ok()
-            .map(|n| (n * 1024.0 * 1024.0) as usize)
-    } else if let Some(num_str) = s.strip_suffix('G') {
-        num_str
-            .parse::<f64>()
-            .ok()
-            .map(|n| (n * 1024.0 * 1024.0 * 1024.0) as usize)
-    } else {
-        s.parse::<usize>().ok()
+pub fn parse_size(s: &str) -> Result<usize, String> {
+    let normalized = s.trim().to_ascii_uppercase();
+    let size = normalized.strip_suffix('B').unwrap_or(&normalized);
+    let (number, multiplier) = match size.as_bytes().last() {
+        Some(b'K') => (&size[..size.len() - 1], 1024.0),
+        Some(b'M') => (&size[..size.len() - 1], 1024.0 * 1024.0),
+        Some(b'G') => (&size[..size.len() - 1], 1024.0 * 1024.0 * 1024.0),
+        _ => (size, 1.0),
+    };
+    let bytes = number.parse::<f64>().unwrap_or(f64::NAN) * multiplier;
+    if !bytes.is_finite() || bytes < 1.0 || bytes >= usize::MAX as f64 {
+        return Err(
+            "Size must be a positive byte count, optionally suffixed with K, M or G".into(),
+        );
     }
+    Ok(bytes as usize)
 }
 
 /// Check if content is an image based on MIME type or file extension
@@ -262,6 +259,10 @@ pub fn resize_image(
     use image::ImageFormat;
     use std::io::Cursor;
 
+    if max_bytes == 0 {
+        return Err("Image byte limit must be positive".into());
+    }
+
     // If already small enough, return as-is
     if data.len() <= max_bytes {
         return Ok((data.to_vec(), content_type.to_string()));
@@ -290,18 +291,25 @@ pub fn resize_image(
     // Resize to fit - scale down proportionally
     let (width, height) = (img.width(), img.height());
     let scale = (max_bytes as f64 / data.len() as f64).sqrt();
-    let new_width = ((width as f64 * scale) as u32).max(1);
-    let new_height = ((height as f64 * scale) as u32).max(1);
-
-    let resized = img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
-
-    // Encode as JPEG for better compression
-    let mut output = Vec::new();
-    resized
-        .write_to(&mut Cursor::new(&mut output), ImageFormat::Jpeg)
-        .map_err(|e| format!("Failed to encode image: {}", e))?;
-
-    Ok((output, "image/jpeg".to_string()))
+    let mut new_width = ((width as f64 * scale) as u32).max(1);
+    let mut new_height = ((height as f64 * scale) as u32).max(1);
+    loop {
+        let resized = img
+            .resize(new_width, new_height, image::imageops::FilterType::Lanczos3)
+            .to_rgb8();
+        let mut output = Vec::new();
+        resized
+            .write_to(&mut Cursor::new(&mut output), ImageFormat::Jpeg)
+            .map_err(|e| format!("Failed to encode image: {e}"))?;
+        if output.len() <= max_bytes {
+            return Ok((output, "image/jpeg".to_string()));
+        }
+        if new_width == 1 && new_height == 1 {
+            return Err(format!("Cannot encode an image within {max_bytes} bytes"));
+        }
+        new_width = (new_width / 2).max(1);
+        new_height = (new_height / 2).max(1);
+    }
 }
 
 /// Sanitize an attachment filename so it's safe to use as a path component.
@@ -425,6 +433,37 @@ pub fn resolve_html(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_limits_reject_invalid_or_nonpositive_values() {
+        assert_eq!(parse_size("1.5MB").unwrap(), 1_572_864);
+        assert_eq!(parse_size("500K").unwrap(), 512_000);
+        assert_eq!(parse_size("1B").unwrap(), 1);
+        for size in [
+            "", "oops", "0", "-1K", "NaNM", "infG", "1e100G", "1BB", "0.1B",
+        ] {
+            assert!(parse_size(size).is_err(), "{size}");
+        }
+    }
+
+    #[test]
+    fn resized_images_fit_the_encoded_byte_limit_or_fail() {
+        let img = image::RgbImage::from_fn(64, 64, |x, y| {
+            image::Rgb([(x * y) as u8, (x * 31) as u8, (y * 13) as u8])
+        });
+        let mut data = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut data),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let (resized, mime) = resize_image(&data, "image/png", 1000).unwrap();
+        assert!(resized.len() <= 1000);
+        assert_eq!(mime, "image/jpeg");
+        assert!(image::load_from_memory(&resized).is_ok());
+        assert!(resize_image(&data, "image/png", 1).is_err());
+        assert!(resize_image(&data, "image/png", 0).is_err());
+    }
     use std::io::Write;
 
     #[tokio::test]

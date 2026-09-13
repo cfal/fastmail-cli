@@ -13,7 +13,10 @@ pub async fn download_attachment(
     format: Option<&str>,
     max_size: Option<&str>,
 ) -> anyhow::Result<()> {
-    let max_bytes = max_size.and_then(parse_size);
+    let max_bytes = max_size
+        .map(parse_size)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
     let client = authenticated_client().await?;
 
     let email = client.get_email(email_id).await?;
@@ -102,7 +105,9 @@ pub async fn download_attachment(
                         };
                         (resized, new_filename)
                     }
-                    Err(_) => (bytes, filename.clone()),
+                    Err(message) => {
+                        return Err(anyhow::anyhow!("Cannot resize {filename}: {message}"));
+                    }
                 }
             } else {
                 (bytes, filename.clone())
