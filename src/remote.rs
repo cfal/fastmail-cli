@@ -98,16 +98,63 @@ impl HttpServer {
             .json(&request)
             .send()
             .await?;
-        crate::util::check_response_status(&response)?;
+        let response = check_response(response).await?;
         let bytes =
             crate::util::read_bounded_response(response, crate::util::MAX_ATTACHMENT_BYTES).await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 }
 
+pub(crate) async fn check_response(response: reqwest::Response) -> Result<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let fallback = || Error::Server(format!("HTTP server request failed ({status})"));
+    let bytes = crate::util::read_bounded_response(response, 16 * 1024)
+        .await
+        .map_err(|_| fallback())?;
+    #[derive(serde::Deserialize)]
+    struct ProxyError {
+        error: String,
+    }
+    let error = serde_json::from_slice::<ProxyError>(&bytes).map_err(|_| fallback())?;
+    if error.error.is_empty() {
+        return Err(fallback());
+    }
+    Err(Error::Server(format!(
+        "HTTP server request failed ({status}): {}",
+        error.error
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn carddav_proxy_errors_preserve_details_but_ignore_non_json_bodies() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        for (body, expected) in [
+            (
+                r#"{"error":"Contact changed concurrently"}"#,
+                "Contact changed concurrently",
+            ),
+            ("not JSON", "HTTP server request failed"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(409).set_body_string(body))
+                .mount(&server)
+                .await;
+            let client = HttpServer::new(&server.uri(), None, None).unwrap();
+            let error = client
+                .contacts::<()>(serde_json::json!({"operation":"delete", "id":"contact"}))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
 
     #[test]
     fn server_url_validation_does_not_echo_credentials() {

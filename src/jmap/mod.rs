@@ -623,6 +623,14 @@ impl JmapClient {
         }
     }
 
+    async fn check_proxy_response(&self, response: reqwest::Response) -> Result<reqwest::Response> {
+        if self.server.is_some() {
+            crate::remote::check_response(response).await
+        } else {
+            Ok(response)
+        }
+    }
+
     /// Build a client that is already "authenticated" against `api_url`, so
     /// tests can point it at a mock JMAP server without going through the
     /// real session endpoint. Re-authentication is redirected there too, so
@@ -667,6 +675,7 @@ impl JmapClient {
             .authorize(self.client.get(&self.session_url))
             .send()
             .await?;
+        let resp = self.check_proxy_response(resp).await?;
 
         match resp.status().as_u16() {
             401 => return Err(Error::InvalidToken("Authentication failed")),
@@ -736,6 +745,7 @@ impl JmapClient {
             .json(&req)
             .send()
             .await?;
+        let resp = self.check_proxy_response(resp).await?;
 
         match resp.status().as_u16() {
             401 => return Err(Error::InvalidToken("Token expired or invalid")),
@@ -1144,6 +1154,7 @@ impl JmapClient {
 
         debug!(url = %url, "Opening JMAP event source");
         let resp = req.send().await?;
+        let resp = self.check_proxy_response(resp).await?;
 
         match resp.status().as_u16() {
             401 => return Err(Error::InvalidToken("Token expired or invalid")),
@@ -1532,6 +1543,7 @@ impl JmapClient {
 
         debug!(url = %url, "Downloading blob");
         let resp = self.authorize(self.client.get(&url)).send().await?;
+        let resp = self.check_proxy_response(resp).await?;
 
         match resp.status().as_u16() {
             401 => return Err(Error::InvalidToken("Token expired or invalid")),
@@ -1565,6 +1577,7 @@ impl JmapClient {
             .body(data)
             .send()
             .await?;
+        let resp = self.check_proxy_response(resp).await?;
 
         match resp.status().as_u16() {
             200..=299 => {}

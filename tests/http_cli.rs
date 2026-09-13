@@ -259,6 +259,34 @@ async fn invalid_image_size_is_rejected_without_contacting_the_server() {
 }
 
 #[tokio::test]
+async fn remote_errors_keep_the_servers_actionable_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_json(json!({"error":"Fastmail is temporarily unavailable"})),
+        )
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let output = command(&server, home.path())
+        .args(["list", "mailboxes"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("Fastmail is temporarily unavailable"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn http_login_never_follows_redirects_or_falls_back_to_fastmail() {
     let destination = MockServer::start().await;
     let server = MockServer::start().await;
