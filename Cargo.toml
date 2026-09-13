@@ -1,9 +1,9 @@
 [package]
 name = "fastmail-cli"
-version = "3.5.0"
+version = "4.0.0"
 edition = "2024"
 description = "CLI for Fastmail's JMAP API"
-repository = "https://github.com/radiosilence/fastmail-cli"
+repository = "https://github.com/cfal/fastmail-cli"
 license = "MIT"
 keywords = ["cli", "email", "fastmail", "jmap"]
 categories = ["command-line-utilities", "email"]

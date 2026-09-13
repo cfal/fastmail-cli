@@ -2,6 +2,9 @@
 
 CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from your terminal or AI assistant.
 
+See [SECURITY.md](SECURITY.md) for deployment boundaries, resource limits and
+dependency advisory dispositions.
+
 ## Features
 
 | Feature               | Description                                                            |
@@ -11,7 +14,8 @@ CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from y
 | **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push — pipe it into a shell loop. Also a GraphQL subscription |
 | **Contacts**          | Search, create, update, delete contacts via CardDAV                    |
 | **Attachments**       | Download files, extract text, resize images                            |
-| **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
+| **Text Extraction**   | Documents via [xberg](https://github.com/xberg-io/xberg), with Rust-native PDF extraction |
+| **HTTP Client**       | `--server URL` runs mail and contact commands using server-owned credentials |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
 | **Masked Email**      | Create, list, enable/disable aliases                                   |
 | **MCP Server**        | Claude integration via Model Context Protocol                          |
@@ -42,7 +46,7 @@ the data path.
 | Real-time stream of incoming mail                          | ✅ (CLI + GraphQL subscription)    | —                                |
 | Mark as spam (+ trains the filter)                         | ✅                                 | —                                |
 | Masked Email (create / enable / disable / delete)          | ✅                                 | —                                |
-| Attachments: text extraction (56 formats) + image resize   | ✅                                 | —                                |
+| Attachments: document text extraction + image resize       | ✅                                 | —                                |
 | Contacts (create / update / delete / search)               | ✅ (CardDAV)                       | ✅                               |
 | Org directory search                                       | —                                  | ✅                               |
 | Calendar                                                   | —                                  | ✅                               |
@@ -66,14 +70,40 @@ its current hosted tool set and may grow.)
 
 ```bash
 # Add to mise config
-mise use -g "github:radiosilence/fastmail-cli"
+mise use -g "github:cfal/fastmail-cli"
 ```
 
 #### From Source
 
 ```bash
-cargo install --git https://github.com/radiosilence/fastmail-cli
+cargo install --git https://github.com/cfal/fastmail-cli --locked
 ```
+
+### HTTP Client
+
+Direct Fastmail access remains the default. To keep Fastmail credentials on a
+server instead, start HTTP mode there and pass its URL to the CLI:
+
+```bash
+# Server, with Fastmail credentials configured there
+fastmail mcp --http 127.0.0.1:8080
+
+# Client, with no Fastmail token or CardDAV password
+fastmail --server http://127.0.0.1:8080 list emails
+fastmail --server http://127.0.0.1:8080 contacts list
+fastmail --server http://127.0.0.1:8080 watch
+```
+
+`FASTMAIL_SERVER` can supply the URL. When the server uses optional Basic auth,
+set `FASTMAIL_SERVER_USER` (or `--server-user`) and `FASTMAIL_SERVER_PASSWORD`.
+Use a secret manager or private environment configuration for the password,
+not a URL or command-line argument. Use HTTPS for remote authenticated access.
+
+Mail, mailbox, identity, masked-email, contact, attachment and watch requests
+all go through `/cli/v1/*`. There is no direct Fastmail fallback. Attachment
+paths, download destinations, extraction and confirmation prompts remain local.
+`auth`, `mcp` and shell completion generation are local administration commands;
+`auth` and `mcp` reject `--server` to prevent configuring the wrong machine.
 
 ### Authentication
 
@@ -308,7 +338,7 @@ fastmail download EMAIL_ID --format json
 fastmail download EMAIL_ID --max-size 500K
 ```
 
-Text extraction uses [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) and supports 56 formats:
+Text extraction uses [xberg](https://github.com/xberg-io/xberg), including these document formats:
 
 - **Documents**: PDF, DOC, DOCX, ODT, RTF
 - **Spreadsheets**: XLS, XLSX, ODS, CSV, TSV
@@ -498,15 +528,15 @@ Three independent surfaces, each opt-in, sharing one port (default
 
 ```bash
 fastmail mcp                                   # stdio MCP, no listener
-fastmail mcp --browser                         # just the IDE, opened for you
-fastmail mcp --http                            # just /mcp
+fastmail mcp --browser                         # HTTP IDE, opened for you
+fastmail mcp --http                            # /mcp and CLI transport
 fastmail mcp --http 0.0.0.0:8080 --graphql     # both, explicit address
 ```
 
-Asking for any surface binds the listener; there is nowhere to mount an HTTP
-route over stdio. Only `--http` puts MCP on it — the transport a model connects
-through and a browsable endpoint for you are separate things. `--browser`
-implies `--graphiql`, since the IDE is what it opens.
+Asking for any HTTP surface binds the listener and mounts `/mcp` and `/cli/v1/*`.
+`--browser` implies `--graphiql`, since the IDE is what it opens. GraphiQL assets
+and editor workers are embedded locally; queries and headers are not persisted
+to browser storage.
 
 `/graphql` is plain GraphQL-over-HTTP, which is what a browser speaks; `/mcp` is
 MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
@@ -812,11 +842,10 @@ per request, so referencing the same email or mailbox twice in one query costs
 one fetch; nothing is retained between requests where it could go stale.
 
 Because the graph contains cycles (`Email.thread.emails`, `Email.mailboxes.emails`),
-nesting is capped at depth 15 — nothing else bounds a cycle. Breadth is **not**
-capped. Resolvers declare a cost (a document parse prices far above a download,
-nested lists scale with page size) but that cost is guidance for choosing a page
-size, surfaced in the field descriptions; it never refuses a query. Being told
-"too complex" without being told the threshold just makes a caller guess.
+nesting is capped at depth 15. The complexity budget is 100,000. Resolvers
+declare a cost (document parsing costs more than downloading; nested lists
+scale with page size). Reduce page sizes or split attachment-heavy requests
+when a query exceeds the budget.
 
 All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
 
@@ -834,9 +863,26 @@ RUST_LOG=debug fastmail list mailboxes
 
 ## JMAP API
 
-This CLI talks directly to Fastmail's JMAP server — the protocol layer is hand-rolled, there's no JMAP client library in the dependency tree. Capabilities are filtered dynamically based on your API token's permissions — read-only tokens work fine for listing/reading, while send and masked email operations require appropriate capabilities.
+By default the CLI talks directly to Fastmail's JMAP server; `--server` routes
+the same protocol operations through your HTTP server. Capabilities follow the
+Fastmail token's permissions: read-only tokens support listing/reading, while
+sending and masked email require the corresponding capabilities.
 
 For more on JMAP: [jmap.io](https://jmap.io/)
+
+## Releases
+
+Pushes to `main` run checks and platform builds but do not publish. After a
+version bump and successful CI, explicitly publish the current main revision:
+
+```bash
+gh workflow run ci.yml --ref main -f publish=true
+```
+
+The workflow refuses older versions and conflicting tags. It publishes the
+GitHub release only after checks, all four platform builds, container uploads
+and release asset uploads succeed. Archives include licenses; `SHA256SUMS`
+covers all four archives.
 
 ## License
 
