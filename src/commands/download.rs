@@ -5,7 +5,7 @@ use crate::util::{
 };
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub async fn download_attachment(
     email_id: &str,
@@ -116,17 +116,7 @@ pub async fn download_attachment(
             (bytes, filename.clone())
         };
 
-        let path = Path::new(out_dir).join(&final_filename);
-        // create_new(true) uses O_EXCL/CREATE_NEW — fails if the target exists,
-        // including through a symlink. Prevents silent overwrite and TOCTOU
-        // attacks where an attacker pre-creates a symlink at the target path.
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to write attachment to {}: {}", path.display(), e)
-            })?;
+        let (mut file, path) = create_attachment_file(Path::new(out_dir), &final_filename)?;
         file.write_all(&final_bytes)?;
 
         downloaded.push(path.to_string_lossy().to_string());
@@ -142,10 +132,77 @@ pub async fn download_attachment(
     Ok(())
 }
 
+fn create_attachment_file(dir: &Path, filename: &str) -> std::io::Result<(std::fs::File, PathBuf)> {
+    let name = Path::new(filename);
+    let stem = name
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    let extension = name
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_default();
+    for number in 1..=1000 {
+        let path = dir.join(if number == 1 {
+            filename.to_owned()
+        } else {
+            format!("{stem}-{number}{extension}")
+        });
+        // Keep exclusive creation on every attempt, including existing symlinks.
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "No unused attachment filename after 1000 attempts",
+    ))
+}
+
 #[derive(serde::Serialize)]
 struct AttachmentContent {
     filename: String,
     content_type: String,
     size: usize,
     text: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colliding_filenames_get_distinct_files_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        for (raw, expected) in [
+            ("first/signature.png", "signature.png"),
+            ("second/signature.png", "signature-2.png"),
+            ("signature.png", "signature-3.png"),
+        ] {
+            let name = sanitize_filename(raw, "attachment");
+            let (mut file, path) = create_attachment_file(dir.path(), &name).unwrap();
+            file.write_all(raw.as_bytes()).unwrap();
+            assert_eq!(path.file_name().unwrap(), expected);
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("signature.png")).unwrap(),
+            b"first/signature.png"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collisions_do_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("file.txt")).unwrap();
+        let (mut file, path) = create_attachment_file(dir.path(), "file.txt").unwrap();
+        file.write_all(b"attachment").unwrap();
+        assert_eq!(path.file_name().unwrap(), "file-2.txt");
+        assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
+    }
 }
