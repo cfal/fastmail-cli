@@ -2,7 +2,63 @@
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-09-13
+
 ### Fixed
+
+- Bound GraphQL document size and input nesting before parsing. Apply the HTTP
+  JSON body limit to MCP requests, including streamed bodies.
+- Preserve untouched vCard properties during contact updates. Protect updates
+  and deletes with ETags, and give UID-less contacts stable resource IDs.
+- Keep watcher cursors until detail reconciliation succeeds, recover from
+  malformed push frames, preserve split UTF-8, and reject zero polling intervals.
+- Respect JMAP object limits for email/thread fetches and refresh mailbox names
+  and roles on long-lived clients. Failed submissions remain in Drafts; read
+  changes patch only the seen flag.
+- Disable subscription record caching, restore pageInfo-only cursors, and return
+  structured session health on cold credential and connectivity failures.
+- Require an account/email-bound, expiring one-shot token for spam confirmation.
+- Enforce encoded image byte limits, reject invalid size arguments, preserve
+  remote error details, and avoid attachment filename collisions without overwriting.
+- Connect GraphiQL subscriptions to the HTTP SSE endpoint using the standard
+  distinct-connection `graphql-sse` protocol (`next`/`complete` events). Subscriber
+  reconnects are explicitly non-resumable; the IDE does not silently reconnect.
+- Reuse HTTP transports and handle construction failures in first-party server
+  paths. Preserve the existing infallible Rust constructors for compatibility.
+- Refresh agent references, document Basic-auth rate-limiting requirements, and
+  make the dependency reachability guard fail closed when its search fails.
+
+Authentication remains optional. No malicious code was identified in the reviewed
+first-party source or targeted dependencies; the existing documented dependency
+dispositions remain in place.
+
+## [4.0.0] - 2026-09-13
+
+### Added
+
+- `--server` HTTP client mode for mail, mailboxes, identities, masked email,
+  contacts, attachments and watch, with no local Fastmail credential fallback.
+- Optional file-backed Basic authentication. All permitted callers use the same
+  server-owned Fastmail/CardDAV account; non-loopback listeners may remain unauthenticated.
+- Local, integrity-locked GraphiQL assets and workers with a restrictive CSP and
+  no persisted queries or headers. Automated dependency and asset checks.
+
+### Changed
+
+- Removed `X-Fastmail-Token`, `X-Fastmail-Username` and `X-Fastmail-App-Password`
+  overrides. Configure credentials on the server instead.
+- Replaced bundled PDFium with the published `xberg` Rust-native PDF backend,
+  without vendoring or unpinned native-library downloads.
+- Bound attachment/response sizes, image decoding, SSE frames and GraphQL cost.
+  Pinned distribution inputs, included platform licenses/checksums, and required
+  explicit verified CI dispatch before publishing complete releases and images.
+
+### Fixed
+
+- Isolated CardDAV credentials, escaped vCard values, pinned resource origins,
+  refused credential-bearing redirects, and bound compose approvals to the
+  operation, account and complete reviewed payload.
+- Hardened credential-file writes, malformed address handling and UTF-8 filenames.
 
 - **`reply` now prefers `Reply-To` over `From`**
   ([#67](https://github.com/radiosilence/fastmail-cli/issues/67), reported by

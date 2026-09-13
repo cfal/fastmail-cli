@@ -1,41 +1,38 @@
-# v4.0.0
+# v4.0.1
 
-## HTTP Client And Authentication
+Security and correctness fixes following two independent comprehensive source
+reviews. No deliberately malicious code was identified in the reviewed scope.
 
-- `fastmail --server URL` routes mail, mailboxes, identities, masked email,
-  contacts, attachments and watch requests through the server. No Fastmail
-  credentials are needed on the client, and there is no direct fallback.
-- HTTP Basic authentication is optional. Start the server with
-  `--auth-file users.toml`, containing a `[users]` table of username/password
-  strings. All users access the same server-configured Fastmail account.
-- Clients can set `FASTMAIL_SERVER`, `FASTMAIL_SERVER_USER` and
-  `FASTMAIL_SERVER_PASSWORD`. Use HTTPS for remote Basic authentication.
-- **Breaking:** `X-Fastmail-Token`, `X-Fastmail-Username` and
-  `X-Fastmail-App-Password` overrides are removed. Configure credentials on the
-  server instead. Local direct CLI mode and stdio MCP remain available.
-- Authentication remains optional even on non-loopback listeners. Without it,
-  every reachable caller can use the server's mailbox credentials. Configure
-  listener addresses, firewalls and trusted proxies accordingly.
+## Security
 
-## Security Fixes
+- Bound GraphQL query size and syntax nesting before parsing, including input
+  values. Apply the 2 MiB JSON limit to streamed MCP request bodies.
+- Require an expiring, one-shot `confirmationToken` from spam PREVIEW before
+  CONFIRM. Tokens are bound to the account, email and operation.
+- Stop subscription record caches from accumulating mail indefinitely. Enforce
+  actual encoded image limits and reject invalid CLI size values.
+- Authentication remains optional, including on non-loopback listeners. Basic
+  users still share the server-configured account. Reachable authenticated
+  listeners should use HTTPS, strong passwords and a rate-limiting reverse proxy.
 
-- Replace bundled PDFium with the published xberg Rust-native PDF backend.
-  No vendoring, shared temporary library loading or unpinned PDFium download.
-- Use request-scoped CardDAV credentials consistently, escape vCard values,
-  validate resource origins and refuse credential-bearing redirects.
-- Bind compose approval tokens to the operation, account, complete recipient
-  list, resolved sender, text, HTML and relevant original-message content.
-- Bound attachment/response sizes, image decoding, SSE frames and GraphQL
-  complexity. Malformed addresses and long UTF-8 filenames no longer panic.
-- Serve GraphiQL scripts, styles, fonts and workers locally under a restrictive
-  content security policy. Do not persist mailbox data in browser storage.
-- Update dependencies and add automated scans. Two time-limited advisory
-  dispositions remain documented in `SECURITY.md`: an unused lru cache path
-  and the unmaintained paste macro dependency.
+## Correctness
 
-## Distribution
+- Preserve unknown/grouped vCard properties, use ETags for contact mutations,
+  and support stable IDs for UID-less contacts.
+- Retry failed arrival reconciliation without losing the cursor. Recover from
+  invalid SSE frames, preserve split UTF-8 and reject zero polling intervals.
+- Respect JMAP fetch limits and refresh mailbox lookups. Keep rejected sends in
+  Drafts and patch read flags without replacing unrelated keywords.
+- Fix cold session health, pageInfo-only cursors, remote error messages and
+  attachment filename collisions. Reuse HTTP transports without sharing credentials.
+- GraphiQL subscriptions now use `/graphql/stream` with `graphql-sse`
+  `next`/`complete` events. Downstream reconnects are not resumable; query for
+  mail received during a disconnect. The IDE surfaces disconnects rather than
+  silently starting a new subscription.
+- Refresh agent references and restore the missing v4.0.0 changelog entry.
+
+No vendoring or new authentication requirement. Existing time-limited `lru` and
+`paste` dependency dispositions remain documented in `SECURITY.md`.
 
 Four platform archives include licenses; `SHA256SUMS` covers the archives.
-Container bases and the Rust toolchain are pinned; containers run unprivileged.
-Publishing now requires an explicit CI dispatch with `publish=true`. A draft
-release is published only after all checks, builds and asset uploads succeed.
+The CI release also publishes Linux amd64/arm64 container manifests.
