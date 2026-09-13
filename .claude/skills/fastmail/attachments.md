@@ -35,9 +35,14 @@ fastmail download abc123 --max-size 800K -o ~/Downloads
 
 ## Format Details
 
-**`raw`** (default): Saves attachment files to disk as-is.
+**`raw`** (default): Saves attachment files to disk, resizing images when
+`--max-size` is set. Existing files are never overwritten; filename collisions
+receive numeric suffixes. Invalid size values and impossible image limits fail
+instead of silently ignoring the limit.
 
-**`json`**: Extracts text from attachments using kreuzberg (supports 56+ formats including PDF, DOCX, XLSX, images with OCR, etc.). Returns structured JSON with content and detected language — useful for agents that need to read document contents without saving files.
+**`json`**: Extracts document text using `xberg`, including PDF, DOCX and XLSX.
+Each result has `filename`, `content_type`, `size` and `text` fields. Images are
+skipped (`text: null`); OCR is disabled and no detected-language field is returned.
 
 ## Workflow: Find Emails with Attachments Then Download
 
@@ -49,7 +54,7 @@ fastmail search --has-attachment --from invoices@vendor.com
 fastmail download EMAIL_ID -o ~/Documents/invoices
 
 # Or extract text for processing
-fastmail download EMAIL_ID -f json | jq '.data[].content'
+fastmail download EMAIL_ID -f json | jq '.data[].text'
 ```
 
 ## Tips

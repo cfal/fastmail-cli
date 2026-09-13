@@ -543,8 +543,10 @@ MCP JSON-RPC, which it doesn't. That is why GraphiQL needs its own route rather
 than pointing at the MCP one. Both share the schema, the client cache and the
 credential resolution below, so the IDE sees exactly what a model sees.
 
-`/graphql/stream` carries subscriptions over Server-Sent Events — POST the
-operation, read events off the response:
+`/graphql/stream` carries subscriptions over Server-Sent Events using the
+distinct-connection `graphql-sse` protocol (`next` and `complete` events).
+GraphiQL routes subscriptions here automatically. POST the operation and read
+events off the response:
 
 ```bash
 curl -N http://127.0.0.1:8080/graphql/stream \
@@ -851,6 +853,10 @@ scale with page size). Reduce page sizes or split attachment-heavy requests
 when a query exceeds the budget.
 
 All operations are available as GraphQL queries and mutations: mailboxes, emails, search, threads, identities (with signatures), attachments (with text extraction and image resizing), contacts, masked email management, and send/reply/forward with the preview/confirm safety pattern.
+
+`markAsSpam` also requires a preview. Request `confirmationToken` in the PREVIEW
+result and pass it to CONFIRM after approval. Tokens expire after 15 minutes and
+cannot be reused, transferred to another account, or applied to a different email.
 
 One subscription, `emails`, streams arrivals over the same machinery as `fastmail watch`.
 

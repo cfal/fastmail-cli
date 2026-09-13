@@ -1,6 +1,6 @@
 ---
 name: fastmail/contacts
-description: fastmail contacts — CardDAV setup, list and search contacts
+description: fastmail contacts — CardDAV setup, search and editing
 ---
 
 # fastmail-cli — Contacts
@@ -34,13 +34,17 @@ fastmail contacts list
 fastmail contacts search "Alice"
 fastmail contacts search "acme.com"
 fastmail contacts search "ACME Corp"
+
+fastmail contacts create --name "Alice Example" --email alice@example.com
+fastmail contacts update CONTACT_ID --title "Engineer"
+fastmail contacts delete CONTACT_ID
 ```
 
 ## Typical Patterns
 
 ```bash
 # Find email address before composing
-fastmail contacts search "Bob Smith" | jq '.data[0].emails[0].value'
+fastmail contacts search "Bob Smith" | jq -r '.data[0].emails[0].email'
 
 # Verify who someone is before replying
 fastmail contacts search "bob@unknown.com"
@@ -53,4 +57,9 @@ fastmail contacts search "bigcorp.com"
 
 - `contacts list` returns all contacts — can be large. Prefer `contacts search` for targeted lookups.
 - Contact data includes name, emails, phone numbers, organization, and notes where available.
-- Read-only via CLI — create/edit contacts through Fastmail web or a CardDAV client.
+- Create/update accept `--name`, `--email`, `--phone`, `--organization`, `--title`
+  and `--notes`. Only create requires a name. Email and phone flags replace the
+  corresponding lists; omitted fields and unsupported vCard properties are preserved.
+- Updates/deletes use ETags. On a concurrent-edit conflict, fetch and review the
+  contact again before retrying. `delete -y` skips the interactive confirmation.
+- In `--server` mode, CardDAV credentials belong on the server, not the CLI client.

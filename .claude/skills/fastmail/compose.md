@@ -91,6 +91,9 @@ fastmail reply $(fastmail search --from boss@co.com --unread | jq -r '.data[0].i
 
 ## Notes
 
-- Body is plain text only.
-- For HTML or complex formatting, compose in Fastmail web and use `--draft` to stage.
+- `--body` supplies plain text. Add `--html-body HTML` or `--html-file PATH`
+  for an HTML alternative; those two flags are mutually exclusive.
+- Attach files using repeatable `-a/--attachment PATH` on send, reply or forward.
+- Messages start in Drafts and move to Sent only after successful submission.
+  A rejected submission leaves a draft, not an apparently sent message.
 - `--from` must match an identity returned by `list identities` — arbitrary addresses won't work.

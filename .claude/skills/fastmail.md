@@ -10,7 +10,9 @@ fastmail-cli is a Rust CLI for Fastmail via JMAP (email) and CardDAV (contacts).
 ## Setup
 
 ```bash
-fastmail auth fmu1-YOUR-TOKEN
+fastmail auth
+# Automation with a private token file:
+fastmail auth < /secure/fastmail-token
 ```
 
 Config lives at `~/.config/fastmail-cli/config.toml`:
@@ -24,6 +26,19 @@ app_password = "xxxx..."
 ```
 
 Or via env: `FASTMAIL_API_TOKEN`, `FASTMAIL_USERNAME`, `FASTMAIL_APP_PASSWORD`
+
+Do not put tokens in positional arguments or URLs. Protect credential files with
+private filesystem permissions.
+
+HTTP client mode uses only the server's Fastmail credentials, with no direct fallback:
+
+```bash
+fastmail --server http://127.0.0.1:8080 list mailboxes
+```
+
+`FASTMAIL_SERVER` also sets the URL. Optional Basic login uses `--server-user`
+(or `FASTMAIL_SERVER_USER`) and `FASTMAIL_SERVER_PASSWORD`; neither is required
+for an unauthenticated server. Use HTTPS for remote Basic authentication.
 
 Debug: `RUST_LOG=debug fastmail [cmd]`
 
@@ -44,6 +59,7 @@ fastmail list identities                          # sender aliases for --from
 ```bash
 fastmail get EMAIL_ID                            # full email with body
 fastmail thread EMAIL_ID                         # entire conversation
+fastmail watch [-m MAILBOX] [--full] [--poll SECONDS]  # NDJSON; poll must be >= 1
 ```
 
 ### Search
@@ -67,6 +83,9 @@ fastmail reply EMAIL_ID --body BODY [--all] [--cc] [--bcc] [--from IDENTITY] [--
 fastmail forward EMAIL_ID --to ADDR [--body STR] [--cc] [--bcc] [--from IDENTITY] [--draft]
 ```
 
+All compose commands accept repeatable `-a/--attachment PATH` and either
+`--html-body HTML` or `--html-file PATH`, in addition to the plain-text body.
+
 ### Manage
 
 ```bash
@@ -86,7 +105,9 @@ fastmail download EMAIL_ID [-o OUTPUT_DIR] [-f raw|json] [--max-size 1M]
 ```bash
 fastmail masked list
 fastmail masked create [--domain URL] [--description STR] [--prefix STR]
-fastmail masked enable/disable/delete ID [-y]
+fastmail masked enable ID
+fastmail masked disable ID
+fastmail masked delete ID [-y]
 ```
 
 ### Contacts
@@ -94,6 +115,9 @@ fastmail masked enable/disable/delete ID [-y]
 ```bash
 fastmail contacts list
 fastmail contacts search QUERY    # name, email, or org
+fastmail contacts create --name NAME [--email ADDRS] [--phone NUMBERS] [--organization ORG] [--title TITLE] [--notes TEXT]
+fastmail contacts update ID [--name NAME] [--email ADDRS] [--phone NUMBERS] [--organization ORG] [--title TITLE] [--notes TEXT]
+fastmail contacts delete ID [-y]
 ```
 
 ### Other
@@ -101,7 +125,14 @@ fastmail contacts search QUERY    # name, email, or org
 ```bash
 fastmail completions bash|zsh|fish|powershell
 fastmail mcp    # start MCP server for Claude Desktop
+fastmail mcp --http 0.0.0.0:8080 --graphiql [--auth-file users.toml]
 ```
+
+The auth file contains a `[users]` table of username/password strings. Authentication
+is optional; every permitted caller accesses the same server-owned account.
+Without it, anyone who can reach the listener can use that account. Use appropriate
+firewall/proxy controls. GraphQL spam confirmation, like compose confirmation,
+requires the one-shot `confirmationToken` returned by `PREVIEW`.
 
 ---
 
@@ -134,4 +165,4 @@ fastmail move abc123 --to "Archive"
 - `/fastmail/conversations` — threading, listing, reading
 - `/fastmail/attachments` — downloading and extracting attachments
 - `/fastmail/masked` — masked email management
-- `/fastmail/contacts` — contact search
+- `/fastmail/contacts` — contact search and editing

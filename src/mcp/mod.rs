@@ -293,7 +293,8 @@ impl ServerHandler for FastmailMcp {
                 ## Safety\n\
                 Never send without showing the user a PREVIEW first, and never \
                 CONFIRM without their explicit approval. Marking spam trains the \
-                filter, so preview that too.",
+                filter, so preview that too and pass its one-shot \
+                confirmationToken to CONFIRM.",
             )
     }
 }

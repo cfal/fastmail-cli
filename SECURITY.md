@@ -12,6 +12,8 @@ server can use its credentials. Loopback binding restricts network exposure but
 does not protect against other local processes or users. Use a trusted network,
 firewall or authenticated reverse proxy as appropriate. Use HTTPS for remote
 Basic authentication; Basic credentials are only encoded, not encrypted.
+Basic login has no built-in attempt throttling. On reachable listeners, use strong
+unique passwords and a rate-limiting reverse proxy for online-guessing resistance.
 
 Protect both the Fastmail config and Basic auth file with private filesystem
 permissions. Passwords in the auth file are plaintext. The server loads it at
