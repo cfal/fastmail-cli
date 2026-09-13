@@ -66,7 +66,7 @@ pub struct AddressBook {
 
 /// Fields for creating or updating a contact.
 /// All fields are optional for updates (only provided fields are changed).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ContactFields<'a> {
     pub name: Option<&'a str>,
     pub emails: Option<&'a [ContactEmail]>,
@@ -81,6 +81,7 @@ pub struct CardDavClient {
     client: Client,
     username: String,
     app_password: String,
+    server: Option<crate::remote::HttpServer>,
 }
 
 impl CardDavClient {
@@ -93,7 +94,14 @@ impl CardDavClient {
                 .expect("Failed to build CardDAV client"),
             username,
             app_password,
+            server: None,
         }
+    }
+
+    pub fn via_server(server: crate::remote::HttpServer) -> Self {
+        let mut client = Self::new(String::new(), String::new());
+        client.server = Some(server);
+        client
     }
 
     fn resource_url(&self, href: &str) -> Result<reqwest::Url> {
@@ -119,6 +127,11 @@ impl CardDavClient {
     /// Discover address books for the user
     #[instrument(skip(self))]
     pub async fn list_addressbooks(&self) -> Result<Vec<AddressBook>> {
+        if let Some(server) = &self.server {
+            return server
+                .contacts(serde_json::json!({"operation":"addressbooks"}))
+                .await;
+        }
         let encoded_user = utf8_percent_encode(&self.username, PATH_SEGMENT);
         let url = format!("{}/dav/addressbooks/user/{}/", CARDDAV_BASE, encoded_user);
 
@@ -208,6 +221,11 @@ impl CardDavClient {
     /// List all contacts in an address book
     #[instrument(skip(self))]
     pub async fn list_contacts(&self, addressbook_href: &str) -> Result<Vec<Contact>> {
+        if let Some(server) = &self.server {
+            return server
+                .contacts(serde_json::json!({"operation":"list", "href":addressbook_href}))
+                .await;
+        }
         let url = self.resource_url(addressbook_href)?;
 
         let body = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -381,6 +399,11 @@ impl CardDavClient {
     /// `fields.name` is required for creation.
     #[instrument(skip(self, fields))]
     pub async fn create_contact(&self, fields: &ContactFields<'_>) -> Result<Contact> {
+        if let Some(server) = &self.server {
+            return server
+                .contacts(serde_json::json!({"operation":"create", "fields":fields}))
+                .await;
+        }
         let name = fields.name.ok_or(Error::Server(
             "Name is required to create a contact".to_string(),
         ))?;
@@ -441,6 +464,13 @@ impl CardDavClient {
         contact_id: &str,
         fields: &ContactFields<'_>,
     ) -> Result<Contact> {
+        if let Some(server) = &self.server {
+            return server
+                .contacts(
+                    serde_json::json!({"operation":"update", "id":contact_id, "fields":fields}),
+                )
+                .await;
+        }
         let (href, existing_vcard) = self
             .find_contact_href(contact_id)
             .await?
@@ -517,6 +547,11 @@ impl CardDavClient {
     /// Delete a contact by ID.
     #[instrument(skip(self))]
     pub async fn delete_contact(&self, contact_id: &str) -> Result<()> {
+        if let Some(server) = &self.server {
+            return server
+                .contacts(serde_json::json!({"operation":"delete", "id":contact_id}))
+                .await;
+        }
         let (href, _) = self
             .find_contact_href(contact_id)
             .await?

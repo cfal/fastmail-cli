@@ -169,7 +169,10 @@ impl ArrivalWatcher {
                     *backoff = BACKOFF_START;
 
                     let mut changed = false;
-                    for event in parser.feed(&String::from_utf8_lossy(&bytes)) {
+                    for event in parser
+                        .feed(&String::from_utf8_lossy(&bytes))
+                        .map_err(|message| Error::Server(message.into()))?
+                    {
                         if let Some(id) = event.id {
                             *last_event_id = Some(id);
                         }

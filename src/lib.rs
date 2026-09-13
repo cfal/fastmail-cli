@@ -11,4 +11,5 @@ pub mod error;
 pub mod jmap;
 pub mod mcp;
 pub mod models;
+pub mod remote;
 pub mod util;

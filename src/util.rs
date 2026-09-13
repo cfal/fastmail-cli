@@ -221,6 +221,16 @@ pub fn infer_image_mime(filename: &str) -> Option<&'static str> {
 pub const MCP_IMAGE_MAX_BYTES: usize = 700 * 1024;
 pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 
+pub(crate) fn check_response_status(response: &reqwest::Response) -> crate::error::Result<()> {
+    if !response.status().is_success() {
+        return Err(crate::error::Error::Server(format!(
+            "HTTP request failed ({})",
+            response.status()
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn read_bounded_response(
     mut response: reqwest::Response,
     limit: usize,

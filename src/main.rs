@@ -36,6 +36,19 @@ fn build_compose_params<'a>(
 #[command(name = "fastmail")]
 #[command(version, about = "CLI for Fastmail's JMAP API", long_about = None)]
 struct Cli {
+    /// Run mail and contact commands through this HTTP server
+    #[arg(long, global = true, env = "FASTMAIL_SERVER", value_name = "URL")]
+    server: Option<String>,
+
+    /// Optional HTTP Basic username; password comes from FASTMAIL_SERVER_PASSWORD
+    #[arg(
+        long,
+        global = true,
+        env = "FASTMAIL_SERVER_USER",
+        value_name = "USERNAME"
+    )]
+    server_user: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -527,7 +540,39 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let result = match cli.command {
+    let result = run(cli).await;
+    if let Err(e) = result {
+        Output::<()>::error(e.to_string()).print();
+        std::process::exit(1);
+    }
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
+    use fastmail_cli::remote::HttpServer;
+    let server = match &cli.server {
+        Some(url) => {
+            if matches!(&cli.command, Commands::Auth { .. } | Commands::Mcp { .. }) {
+                anyhow::bail!("--server is for mail/contact commands; auth and mcp run locally");
+            }
+            let password = std::env::var("FASTMAIL_SERVER_PASSWORD").ok();
+            Some(HttpServer::new(
+                url,
+                cli.server_user.as_deref(),
+                password.as_deref(),
+            )?)
+        }
+        None => {
+            if cli.server_user.is_some() {
+                anyhow::bail!("--server-user requires --server");
+            }
+            None
+        }
+    };
+    HttpServer::scope(server, run_command(cli.command)).await
+}
+
+async fn run_command(command: Commands) -> anyhow::Result<()> {
+    match command {
         Commands::Auth { token } => {
             let resolved = match token {
                 Some(t) => Ok(t),
@@ -714,7 +759,7 @@ async fn main() {
 
         Commands::Completions { shell } => {
             generate(shell, &mut Cli::command(), "fastmail", &mut io::stdout());
-            return;
+            Ok(())
         }
 
         Commands::Masked(cmd) => match cmd {
@@ -824,10 +869,5 @@ async fn main() {
                 None => mcp::run_server().await,
             }
         }
-    };
-
-    if let Err(e) = result {
-        Output::<()>::error(e.to_string()).print();
-        std::process::exit(1);
     }
 }

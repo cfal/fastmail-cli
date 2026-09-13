@@ -26,7 +26,11 @@ pub struct EventParser {
 
 impl EventParser {
     /// Append a chunk and return every frame it completed.
-    pub fn feed(&mut self, chunk: &str) -> Vec<ServerEvent> {
+    pub fn feed(&mut self, chunk: &str) -> Result<Vec<ServerEvent>, &'static str> {
+        if self.buf.len().saturating_add(chunk.len()) > 1024 * 1024 {
+            self.buf.clear();
+            return Err("Event stream frame exceeds 1 MiB");
+        }
         self.buf.push_str(chunk);
 
         let mut out = Vec::new();
@@ -36,7 +40,7 @@ impl EventParser {
                 out.push(event);
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -92,7 +96,9 @@ mod tests {
     #[test]
     fn parses_a_whole_frame() {
         let mut parser = EventParser::default();
-        let events = parser.feed("event: state\ndata: {\"x\":1}\nid: abc\n\n");
+        let events = parser
+            .feed("event: state\ndata: {\"x\":1}\nid: abc\n\n")
+            .unwrap();
         assert_eq!(
             events,
             vec![ServerEvent {
@@ -106,9 +112,9 @@ mod tests {
     #[test]
     fn holds_a_frame_split_across_chunks() {
         let mut parser = EventParser::default();
-        assert!(parser.feed("event: sta").is_empty());
-        assert!(parser.feed("te\ndata: {\"x\":1}").is_empty());
-        let events = parser.feed("\n\n");
+        assert!(parser.feed("event: sta").unwrap().is_empty());
+        assert!(parser.feed("te\ndata: {\"x\":1}").unwrap().is_empty());
+        let events = parser.feed("\n\n").unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "{\"x\":1}");
     }
@@ -116,8 +122,8 @@ mod tests {
     #[test]
     fn holds_a_frame_split_between_cr_and_lf() {
         let mut parser = EventParser::default();
-        assert!(parser.feed("data: hi\r\n\r").is_empty());
-        let events = parser.feed("\ndata: there\r\n\r\n");
+        assert!(parser.feed("data: hi\r\n\r").unwrap().is_empty());
+        let events = parser.feed("\ndata: there\r\n\r\n").unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].data, "hi");
         assert_eq!(events[1].data, "there");
@@ -126,28 +132,36 @@ mod tests {
     #[test]
     fn joins_repeated_data_lines() {
         let mut parser = EventParser::default();
-        let events = parser.feed("data: one\ndata: two\n\n");
+        let events = parser.feed("data: one\ndata: two\n\n").unwrap();
         assert_eq!(events[0].data, "one\ntwo");
     }
 
     #[test]
     fn yields_several_frames_from_one_chunk() {
         let mut parser = EventParser::default();
-        let events = parser.feed("data: a\n\ndata: b\n\ndata: c\n\n");
+        let events = parser.feed("data: a\n\ndata: b\n\ndata: c\n\n").unwrap();
         assert_eq!(events.len(), 3);
     }
 
     #[test]
     fn skips_comment_only_frames() {
         let mut parser = EventParser::default();
-        assert!(parser.feed(": ping\n\n").is_empty());
+        assert!(parser.feed(": ping\n\n").unwrap().is_empty());
     }
 
     #[test]
     fn tolerates_a_missing_space_after_the_colon() {
         let mut parser = EventParser::default();
-        let events = parser.feed("event:state\ndata:{}\n\n");
+        let events = parser.feed("event:state\ndata:{}\n\n").unwrap();
         assert_eq!(events[0].event.as_deref(), Some("state"));
         assert_eq!(events[0].data, "{}");
+    }
+
+    #[test]
+    fn unterminated_frames_cannot_grow_without_bound() {
+        let mut parser = EventParser::default();
+        assert!(parser.feed(&"x".repeat(1024 * 1024)).unwrap().is_empty());
+        assert!(parser.feed("x").is_err());
+        assert!(parser.buf.is_empty());
     }
 }

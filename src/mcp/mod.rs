@@ -20,6 +20,7 @@ use crate::jmap::JmapClient;
 
 type ToolResult = std::result::Result<CallToolResult, McpError>;
 
+mod cli_http;
 pub mod graphql;
 mod http_security;
 mod graphiql_assets {
@@ -246,7 +247,7 @@ impl ServerHandler for FastmailMcp {
     fn get_info(&self) -> ServerInfo {
         let server_info = Implementation::new("fastmail", env!("CARGO_PKG_VERSION"))
             .with_title("Fastmail MCP Server")
-            .with_website_url("https://github.com/radiosilence/fastmail-cli");
+            .with_website_url("https://github.com/cfal/fastmail-cli");
 
         // No protocol version is declared: rmcp defaults to the newest it
         // implements, and negotiation settles on the lower of ours and the
@@ -522,7 +523,9 @@ fn http_router(
         config,
     );
 
-    let mut router = axum::Router::new().nest_service("/mcp", service);
+    let mut router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .merge(cli_http::router());
 
     if surfaces.graphql || surfaces.graphiql {
         router = router
@@ -590,7 +593,19 @@ mod tests {
         });
         let client = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{port}");
-        for path in ["/", "/mcp", "/graphql", "/graphql/stream"] {
+        for path in [
+            "/",
+            "/mcp",
+            "/graphql",
+            "/graphql/stream",
+            "/assets/main.js",
+            "/cli/v1/session",
+            "/cli/v1/jmap",
+            "/cli/v1/upload",
+            "/cli/v1/download",
+            "/cli/v1/contacts",
+            "/cli/v1/events",
+        ] {
             let response = client.post(format!("{base}{path}")).send().await.unwrap();
             assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED, "{path}");
             assert!(
@@ -642,6 +657,125 @@ mod tests {
                 .unwrap()
                 .contains("No Fastmail token available")
         );
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn cli_http_roundtrip_keeps_fastmail_credentials_on_server() {
+        use serde_json::{Value, json};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let upstream = MockServer::start().await;
+        let origin = upstream.uri();
+        Mock::given(method("GET"))
+            .and(path("/jmap/session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "capabilities":{"urn:ietf:params:jmap:core":{},"urn:ietf:params:jmap:mail":{}},
+                "accounts":{}, "primaryAccounts":{"urn:ietf:params:jmap:mail":"acct1"},
+                "username":"server@example.com", "apiUrl":format!("{origin}/jmap"),
+                "downloadUrl":format!("{origin}/download?blob={{blobId}}"),
+                "uploadUrl":format!("{origin}/upload"),
+                "eventSourceUrl":format!("{origin}/events?ping={{ping}}")
+            })))
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/jmap"))
+            .respond_with(|req: &wiremock::Request| {
+                let value: Value = serde_json::from_slice(&req.body).unwrap();
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"methodResponses":value["methodCalls"]}))
+            })
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"attachment"))
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"blobId":"uploaded"})))
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/events"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("id: event2\ndata: {}\n\n", "text/event-stream"),
+            )
+            .mount(&upstream)
+            .await;
+        let mcp = FastmailMcp::build(Some("server-only".into()));
+        let local = JmapClient::with_test_session(&format!("{origin}/jmap"));
+        mcp.clients
+            .lock()
+            .await
+            .insert("server-only".into(), Arc::new(Mutex::new(local)));
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, b"[users]\ncli = 'login'").unwrap();
+        let auth = http_security::BasicAuth::load(file.path()).unwrap();
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let policy = http_security::HttpSecurity::new(addr, Some(auth), vec![]).unwrap();
+        let router = http_router(
+            mcp,
+            HttpSurfaces {
+                graphql: false,
+                graphiql: false,
+                browser: false,
+            },
+            policy,
+        )
+        .unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let remote = crate::remote::HttpServer::new(
+            &format!("http://127.0.0.1:{}", addr.port()),
+            Some("cli"),
+            Some("login"),
+        )
+        .unwrap();
+        crate::remote::HttpServer::scope(Some(remote), async {
+            let client = crate::jmap::authenticated_client().await.unwrap();
+            assert_eq!(client.session().unwrap().username, "server@example.com");
+            let calls = vec![json!(["Mailbox/get", {"accountId":"acct1"}, "0"])];
+            assert_eq!(client.request(calls.clone()).await.unwrap(), calls);
+            assert_eq!(
+                client.download_blob("blob/a?b&c").await.unwrap(),
+                b"attachment"
+            );
+            assert_eq!(
+                client
+                    .upload_blob(b"upload".to_vec(), "text/plain")
+                    .await
+                    .unwrap(),
+                "uploaded"
+            );
+            let response = client.open_event_stream(30, Some("event1")).await.unwrap();
+            assert!(response.text().await.unwrap().contains("id: event2"));
+        })
+        .await;
+        for request in upstream.received_requests().await.unwrap() {
+            assert_eq!(request.headers["authorization"], "Bearer test-token");
+            assert!(!request.headers.contains_key("x-fastmail-token"));
+            if request.url.path() == "/download" {
+                assert_eq!(
+                    request.url.query_pairs().collect::<Vec<_>>(),
+                    vec![("blob".into(), "blob/a?b&c".into())]
+                );
+            }
+            if request.url.path() == "/events" {
+                assert_eq!(request.headers["last-event-id"], "event1");
+            }
+            if request.url.path() == "/upload" {
+                assert_eq!(request.body, b"upload");
+            }
+        }
         task.abort();
         let _ = task.await;
     }

@@ -77,6 +77,7 @@ const DESIRED_CAPABILITIES: &[&str] = &[
     "https://www.fastmail.com/dev/maskedemail",
 ];
 
+#[derive(Clone)]
 pub struct JmapClient {
     client: Client,
     token: String,
@@ -84,10 +85,16 @@ pub struct JmapClient {
     session: Option<Session>,
     available_capabilities: Vec<String>,
     cached_mailboxes: Option<Vec<Mailbox>>,
+    server: Option<crate::remote::HttpServer>,
 }
 
 /// Create an authenticated JMAP client from config
 pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
+    if let Some(server) = crate::remote::HttpServer::current() {
+        let mut client = JmapClient::via_server(server);
+        client.authenticate().await?;
+        return Ok(client);
+    }
     let config = crate::config::Config::load()?;
     let token = config.get_token()?;
     let mut client = JmapClient::new(token);
@@ -476,7 +483,10 @@ fn apply_url_template(tmpl: &str, vars: &[(&str, &str)]) -> String {
         if let Some(close) = after_open.find('}') {
             let key = &after_open[..close];
             match vars.iter().find(|(k, _)| *k == key) {
-                Some((_, v)) => result.push_str(v),
+                Some((_, v)) => result.push_str(
+                    &percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC)
+                        .to_string(),
+                ),
                 None => {
                     // Unknown placeholder — preserve literally so a downstream
                     // system that recognises it still can.
@@ -595,6 +605,21 @@ impl JmapClient {
             session: None,
             available_capabilities: Vec::new(),
             cached_mailboxes: None,
+            server: None,
+        }
+    }
+
+    pub fn via_server(server: crate::remote::HttpServer) -> Self {
+        let mut client = Self::new(String::new());
+        client.session_url = server.url("session").to_string();
+        client.server = Some(server);
+        client
+    }
+
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.server {
+            Some(server) => server.authorize(request),
+            None => request.bearer_auth(&self.token),
         }
     }
 
@@ -632,9 +657,7 @@ impl JmapClient {
     pub async fn authenticate(&mut self) -> Result<&Session> {
         debug!("Fetching JMAP session");
         let resp = self
-            .client
-            .get(&self.session_url)
-            .bearer_auth(&self.token)
+            .authorize(self.client.get(&self.session_url))
             .send()
             .await?;
 
@@ -645,10 +668,20 @@ impl JmapClient {
             _ => {}
         }
 
-        resp.error_for_status_ref()?;
+        crate::util::check_response_status(&resp)?;
         let bytes =
             crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await?;
-        let session: Session = serde_json::from_slice(&bytes)?;
+        let mut session: Session = serde_json::from_slice(&bytes)?;
+        if let Some(server) = &self.server {
+            // Never follow endpoints supplied by a remote server with HTTP login credentials.
+            session.api_url = server.url("jmap").to_string();
+            session.download_url = format!("{}?blob_id={{blobId}}", server.url("download"));
+            session.upload_url = server.url("upload").to_string();
+            session.event_source_url = session
+                .event_source_url
+                .as_ref()
+                .map(|_| format!("{}?ping={{ping}}", server.url("events")));
+        }
         debug!(username = %session.username, "Session established");
         self.available_capabilities = DESIRED_CAPABILITIES
             .iter()
@@ -683,7 +716,7 @@ impl JmapClient {
     }
 
     #[instrument(skip(self, method_calls))]
-    async fn request(&self, method_calls: Vec<Value>) -> Result<Vec<Value>> {
+    pub(crate) async fn request(&self, method_calls: Vec<Value>) -> Result<Vec<Value>> {
         let session = self.session()?;
         let req = JmapRequest {
             using: self.available_capabilities.clone(),
@@ -692,9 +725,7 @@ impl JmapClient {
 
         debug!(url = %session.api_url, "Making JMAP request");
         let resp = self
-            .client
-            .post(&session.api_url)
-            .bearer_auth(&self.token)
+            .authorize(self.client.post(&session.api_url))
             .json(&req)
             .send()
             .await?;
@@ -706,7 +737,7 @@ impl JmapClient {
             _ => {}
         }
 
-        resp.error_for_status_ref()?;
+        crate::util::check_response_status(&resp)?;
         let body =
             crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await?;
         let jmap_resp: JmapResponse = serde_json::from_slice(&body)?;
@@ -1085,9 +1116,8 @@ impl JmapClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
-        let mut req = client
-            .get(&url)
-            .bearer_auth(&self.token)
+        let mut req = self
+            .authorize(client.get(&url))
             .header("Accept", "text/event-stream");
         if let Some(id) = last_event_id {
             req = req.header("Last-Event-ID", id);
@@ -1103,6 +1133,20 @@ impl JmapClient {
             _ => {}
         }
 
+        crate::util::check_response_status(&resp)?;
+        if !resp
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+            })
+        {
+            return Err(Error::Server("Expected an event stream response".into()));
+        }
         Ok(resp)
     }
 
@@ -1462,12 +1506,7 @@ impl JmapClient {
         );
 
         debug!(url = %url, "Downloading blob");
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.token)
-            .send()
-            .await?;
+        let resp = self.authorize(self.client.get(&url)).send().await?;
 
         match resp.status().as_u16() {
             401 => return Err(Error::InvalidToken("Token expired or invalid")),
@@ -1477,7 +1516,7 @@ impl JmapClient {
             _ => {}
         }
 
-        resp.error_for_status_ref()?;
+        crate::util::check_response_status(&resp)?;
         crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await
     }
 
@@ -1496,9 +1535,7 @@ impl JmapClient {
 
         debug!(url = %url, content_type = %content_type, size = data.len(), "Uploading blob");
         let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.token)
+            .authorize(self.client.post(&url))
             .header("Content-Type", content_type)
             .body(data)
             .send()
@@ -1881,7 +1918,7 @@ mod tests {
     fn test_apply_url_template_no_cascade() {
         // A value that contains another template marker must not be re-substituted.
         let result = apply_url_template("https://x/{a}/{b}", &[("a", "{b}"), ("b", "LEAKED")]);
-        assert_eq!(result, "https://x/{b}/LEAKED");
+        assert_eq!(result, "https://x/%7Bb%7D/LEAKED");
     }
 
     #[test]
@@ -2485,9 +2522,7 @@ mod tests {
             .and(header("Authorization", "Bearer test-token"))
             .and(header("Last-Event-ID", "evt-7"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Content-Type", "text/event-stream")
-                    .set_body_string(": ping\n\n"),
+                ResponseTemplate::new(200).set_body_raw(": ping\n\n", "text/event-stream"),
             )
             .mount(&mock_server)
             .await;
