@@ -495,11 +495,17 @@ async fn graphql_stream_endpoint(
         }
     };
 
-    let events = mcp.schema.execute_stream(request).map(|response| {
-        let data = serde_json::to_string(&response)
-            .unwrap_or_else(|e| format!(r#"{{"errors":[{{"message":"{e}"}}]}}"#));
-        Ok::<_, std::convert::Infallible>(sse::Event::default().data(data))
-    });
+    let events = mcp
+        .schema
+        .execute_stream(request)
+        .map(|response| {
+            let data = serde_json::to_string(&response)
+                .unwrap_or_else(|e| format!(r#"{{"errors":[{{"message":"{e}"}}]}}"#));
+            Ok::<_, std::convert::Infallible>(sse::Event::default().event("next").data(data))
+        })
+        .chain(async_graphql::futures_util::stream::once(async {
+            Ok(sse::Event::default().event("complete").data(""))
+        }));
 
     // Proxies drop connections that go quiet, and a mail subscription is quiet
     // most of the time.
@@ -1044,6 +1050,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn graphql_stream_emits_next_and_complete_protocol_events() {
+        let mcp = FastmailMcp::build(Some("test-token".into()));
+        let client = JmapClient::with_test_session("http://127.0.0.1:1");
+        mcp.clients
+            .lock()
+            .await
+            .insert("test-token".into(), Arc::new(Mutex::new(client)));
+        let response = graphql_stream_endpoint(
+            axum::extract::State(mcp),
+            axum::Json(HttpGraphqlRequest {
+                query: "subscription { emails(pollSeconds: 0) { id } }".into(),
+                variables: None,
+                operation_name: None,
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.headers()[http::header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains("event: next\n"), "{text}");
+        assert!(text.contains("event: complete\n"), "{text}");
+        assert!(text.contains("at least one second"));
     }
 
     #[test]
