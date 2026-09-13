@@ -34,25 +34,26 @@ use graphql::{CardDavCreds, FastmailSchema, SharedClient};
 /// re-run the JMAP session handshake on every tool call. Shared across sessions.
 type ClientCache = Arc<Mutex<HashMap<String, SharedClient>>>;
 
-/// Get or lazily create an authenticated JMAP client for `token`, caching it
-/// for reuse. The JMAP session handshake runs once per distinct token.
-async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedClient> {
-    if let Some(existing) = cache.lock().await.get(token) {
-        return Ok(existing.clone());
-    }
-    // Authenticate outside the cache lock so concurrent callers for other
-    // tokens aren't blocked on this network round-trip.
-    let mut client = JmapClient::new(token.to_string());
-    client.authenticate().await?;
-    let shared: SharedClient = Arc::new(Mutex::new(client));
-
-    // Re-check under lock: another caller may have inserted meanwhile.
-    Ok(cache
+async fn cached_client(cache: &ClientCache, token: &str) -> SharedClient {
+    cache
         .lock()
         .await
         .entry(token.to_string())
-        .or_insert(shared)
-        .clone())
+        .or_insert_with(|| Arc::new(Mutex::new(JmapClient::new(token.to_string()))))
+        .clone()
+}
+
+/// Ordinary operations authenticate on first use. Health probes own their
+/// handshake so cold failures can be reported as structured session status.
+async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedClient> {
+    let shared = cached_client(cache, token).await;
+    {
+        let mut client = shared.lock().await;
+        if client.session().is_err() {
+            client.authenticate().await?;
+        }
+    }
+    Ok(shared)
 }
 
 /// Server-owned Fastmail credentials, resolved independently of HTTP login.
@@ -214,7 +215,12 @@ markAsRead, markAsSpam, and the remaining filter and sort options."
                 "No Fastmail token available. Configure one on the server via `fastmail auth`.",
             );
         };
-        let client = match client_for(&self.clients, token).await {
+        let resolved = if is_local_query(&req.query, true, None) {
+            Ok(cached_client(&self.clients, token).await)
+        } else {
+            client_for(&self.clients, token).await
+        };
+        let client = match resolved {
             Ok(client) => client,
             Err(e) => return Self::error_result(format!("Fastmail authentication failed: {e}")),
         };
@@ -356,7 +362,11 @@ async fn graphiql_asset(
 /// you with an IDE that cannot describe the API you are trying to explore.
 /// Anything it cannot parse, or that mixes in real fields, is not introspection.
 fn is_introspection_only(query: &str) -> bool {
-    use async_graphql::parser::types::Selection;
+    is_local_query(query, false, None)
+}
+
+fn is_local_query(query: &str, allow_session: bool, operation_name: Option<&str>) -> bool {
+    use async_graphql::parser::types::{OperationType, Selection};
 
     if graphql::check_query(query).is_err() {
         return false;
@@ -364,18 +374,43 @@ fn is_introspection_only(query: &str) -> bool {
     let Ok(doc) = async_graphql::parser::parse_query(query) else {
         return false;
     };
-    doc.operations.iter().all(|(_, op)| {
-        op.node
-            .selection_set
-            .node
-            .items
-            .iter()
-            .all(|item| match &item.node {
-                Selection::Field(field) => field.node.name.node.starts_with("__"),
-                // Fragments could hide anything; make them take the auth path.
-                _ => false,
-            })
-    })
+    let mut selections = Vec::new();
+    for (name, op) in doc.operations.iter() {
+        if operation_name.is_some_and(|wanted| name.map(|n| n.as_str()) != Some(wanted)) {
+            continue;
+        }
+        if op.node.ty != OperationType::Query {
+            return false;
+        }
+        selections.extend(op.node.selection_set.node.items.iter());
+    }
+    if selections.is_empty() {
+        return false;
+    }
+    let mut visited = std::collections::HashSet::new();
+    while let Some(selection) = selections.pop() {
+        match &selection.node {
+            Selection::Field(field) => {
+                let name = field.node.name.node.as_str();
+                if !name.starts_with("__") && !(allow_session && name == "session") {
+                    return false;
+                }
+            }
+            Selection::InlineFragment(fragment) => {
+                selections.extend(fragment.node.selection_set.node.items.iter())
+            }
+            Selection::FragmentSpread(spread) => {
+                let name = &spread.node.fragment_name.node;
+                if visited.insert(name) {
+                    let Some(fragment) = doc.fragments.get(name) else {
+                        return false;
+                    };
+                    selections.extend(fragment.node.selection_set.node.items.iter());
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Resolve credentials and build the GraphQL request an HTTP body describes.
@@ -403,9 +438,13 @@ async fn build_http_request(
         // Authenticated on first use rather than at startup, so a missing or
         // expired token surfaces in the response pane instead of stopping the
         // server booting.
-        let client = client_for(&mcp.clients, token)
-            .await
-            .map_err(|e| format!("Fastmail authentication failed: {e}"))?;
+        let client = if is_local_query(&req.query, true, req.operation_name.as_deref()) {
+            cached_client(&mcp.clients, token).await
+        } else {
+            client_for(&mcp.clients, token)
+                .await
+                .map_err(|e| format!("Fastmail authentication failed: {e}"))?
+        };
         graphql::request(&req.query, client, mcp.default_carddav.clone())
     };
     if let Some(vars) = req.variables {
@@ -923,6 +962,9 @@ mod tests {
             "{ __type(name: \"Email\") { name } }"
         ));
         assert!(is_introspection_only("{ __typename }"));
+        assert!(is_introspection_only(
+            "{ ...F } fragment F on QueryRoot { __typename }"
+        ));
     }
 
     #[test]
@@ -933,11 +975,84 @@ mod tests {
         assert!(!is_introspection_only(
             "mutation { sendEmail(action: PREVIEW) { preview } }"
         ));
-        // Fragments could hide anything, and unparseable input proves nothing.
+        // Classify fragment contents as well as direct selections.
         assert!(!is_introspection_only(
-            "{ ...F } fragment F on Query { __typename }"
+            "{ ...F } fragment F on QueryRoot { mailboxes { name } }"
         ));
         assert!(!is_introspection_only("{ this is not graphql"));
+    }
+
+    #[tokio::test]
+    async fn cold_health_failures_are_structured_through_http_and_mcp() {
+        use serde_json::json;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        for (status, expected) in [
+            (401, "INVALID_CREDENTIALS"),
+            (503, "UNREACHABLE"),
+            (0, "UNREACHABLE"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status.max(400)))
+                .mount(&server)
+                .await;
+            let endpoint = if status == 0 {
+                "http://127.0.0.1:1".to_owned()
+            } else {
+                server.uri()
+            };
+            for http in [true, false] {
+                let mcp = FastmailMcp::build(Some("test-token".into()));
+                // Inject only the endpoint, never an authenticated session.
+                let client = JmapClient::with_test_session_endpoint(&endpoint);
+                assert!(client.session().is_err());
+                mcp.clients
+                    .lock()
+                    .await
+                    .insert("test-token".into(), Arc::new(Mutex::new(client)));
+                let query =
+                    "query Health { ...Probe } fragment Probe on QueryRoot { session { status } }";
+                let response = if http {
+                    let result = graphql_endpoint(
+                        axum::extract::State(mcp),
+                        axum::Json(HttpGraphqlRequest {
+                            query: query.into(),
+                            variables: None,
+                            operation_name: Some("Health".into()),
+                        }),
+                    )
+                    .await;
+                    serde_json::to_value(result.0).unwrap()
+                } else {
+                    serde_json::from_str(&text_of(
+                        mcp.graphql(Parameters(GraphqlRequest {
+                            query: query.into(),
+                            variables: None,
+                        }))
+                        .await
+                        .unwrap(),
+                    ))
+                    .unwrap()
+                };
+                assert_eq!(
+                    response["data"]["session"]["status"],
+                    json!(expected),
+                    "{response}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_selected_health_queries_defer_authentication() {
+        let document = "query Health { session { status } } query Mail { emails { nodes { id } } }";
+        assert!(is_local_query(document, true, Some("Health")));
+        assert!(!is_local_query(document, true, Some("Mail")));
+        assert!(!is_local_query(
+            "{ session { status } mailboxes { name } }",
+            true,
+            None
+        ));
     }
 
     #[tokio::test]

@@ -653,6 +653,13 @@ impl JmapClient {
         client
     }
 
+    #[cfg(test)]
+    pub fn with_test_session_endpoint(url: &str) -> Self {
+        let mut client = Self::new("test-token".into());
+        client.session_url = url.into();
+        client
+    }
+
     #[instrument(skip(self))]
     pub async fn authenticate(&mut self) -> Result<&Session> {
         debug!("Fetching JMAP session");
