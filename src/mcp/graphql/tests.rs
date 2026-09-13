@@ -1961,6 +1961,14 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         for call in body["methodCalls"].as_array().into_iter().flatten() {
             if call[0] == "EmailSubmission/set" {
+                assert_eq!(
+                    call[1]["onSuccessUpdateEmail"]["#submission"]["mailboxIds"],
+                    json!({"sent":true})
+                );
+                assert_eq!(
+                    call[1]["onSuccessUpdateEmail"]["#submission"]["keywords/$draft"],
+                    Value::Null
+                );
                 submissions += 1;
             }
             if call[0] != "Email/set" {
@@ -1968,6 +1976,8 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
             }
             creates += 1;
             let email = &call[1]["create"]["email"];
+            assert_eq!(email["mailboxIds"], json!({"drafts":true}));
+            assert_eq!(email["keywords"]["$draft"], true);
             assert_eq!(email["cc"][0]["email"], "cc@example.com");
             assert_eq!(email["bcc"][0]["email"], "bcc@example.com");
             assert_eq!(email["from"][0]["email"], "me@example.com");

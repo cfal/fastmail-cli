@@ -211,6 +211,7 @@ fn apply_body_structure(
 struct ComposeContext {
     account_id: String,
     mailbox: Mailbox,
+    sent_mailbox: Option<Mailbox>,
     identity: Option<Identity>,
     draft: bool,
 }
@@ -221,9 +222,7 @@ impl ComposeContext {
             "mailboxIds".into(),
             json!({ self.mailbox.id.clone(): true }),
         );
-        if self.draft {
-            email_create.insert("keywords".into(), json!({ "$draft": true, "$seen": true }));
-        }
+        email_create.insert("keywords".into(), json!({ "$draft": true, "$seen": true }));
         if let Some(ref identity) = self.identity {
             email_create.insert(
                 "from".into(),
@@ -243,6 +242,7 @@ impl ComposeContext {
         ])];
         if !self.draft
             && let Some(ref identity) = self.identity
+            && let Some(ref sent) = self.sent_mailbox
         {
             calls.push(json!([
                 "EmailSubmission/set",
@@ -256,6 +256,8 @@ impl ComposeContext {
                     },
                     "onSuccessUpdateEmail": {
                         "#submission": {
+                            "mailboxIds": { (sent.id.clone()): true },
+                            "keywords/$draft": null,
                             "keywords/$seen": true
                         }
                     }
@@ -1282,10 +1284,11 @@ impl JmapClient {
             self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
         }
         let account_id = self.account_id()?.to_string();
-        let mailbox = if draft {
-            self.find_mailbox("drafts").await?
+        let mailbox = self.find_mailbox("drafts").await?;
+        let sent_mailbox = if draft {
+            None
         } else {
-            self.find_mailbox("sent").await?
+            Some(self.find_mailbox("sent").await?)
         };
         let identity = match self.resolve_identity(from).await {
             Ok(id) => Some(id),
@@ -1295,6 +1298,7 @@ impl JmapClient {
         Ok(ComposeContext {
             account_id,
             mailbox,
+            sent_mailbox,
             identity,
             draft,
         })
@@ -2464,6 +2468,62 @@ mod tests {
         assert_eq!(client.find_mailbox("sent").await.unwrap().id, "old");
         assert_eq!(client.find_mailbox("sent").await.unwrap().id, "new");
         assert_eq!(client.find_mailbox("renamed").await.unwrap().id, "new");
+    }
+
+    #[tokio::test]
+    async fn failed_submission_leaves_a_draft_not_a_sent_message() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let calls = body["methodCalls"].as_array().unwrap();
+            let response = match calls[0][0].as_str().unwrap() {
+                "Mailbox/get" => jmap_response("Mailbox/get", json!({"list":[
+                    {"id":"drafts", "name":"Drafts", "role":"drafts"},
+                    {"id":"sent", "name":"Sent", "role":"sent"}
+                ]})),
+                "Identity/get" => jmap_response("Identity/get", json!({"list":[{"id":"i0", "email":"sender@example.test"}]})),
+                "Email/set" => {
+                    let email = &calls[0][1]["create"]["email"];
+                    assert_eq!(email["mailboxIds"], json!({"drafts":true}));
+                    assert_eq!(email["keywords"]["$draft"], true);
+                    let update = &calls[1][1]["onSuccessUpdateEmail"]["#submission"];
+                    assert_eq!(update["mailboxIds"], json!({"sent":true}));
+                    assert_eq!(update["keywords/$draft"], Value::Null);
+                    json!({"methodResponses":[
+                        ["Email/set", {"created":{"email":{"id":"draft-1"}}}, "e0"],
+                        ["EmailSubmission/set", {"notCreated":{"submission":{"type":"forbidden", "description":"Not sent"}}}, "s0"]
+                    ]})
+                }
+                name => panic!("Unexpected method {name}"),
+            };
+            ResponseTemplate::new(200).set_body_json(response)
+        }).mount(&server).await;
+        let mut client = mock_client(&server.uri());
+        client
+            .available_capabilities
+            .push("urn:ietf:params:jmap:submission".into());
+        let error = client
+            .send_email(
+                vec![EmailAddress {
+                    email: "to@example.test".into(),
+                    name: None,
+                }],
+                "Subject",
+                "Body",
+                None,
+                ComposeParams {
+                    cc: vec![],
+                    bcc: vec![],
+                    from: None,
+                    draft: false,
+                    html_body: None,
+                    attachments: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Not sent"));
     }
 
     #[tokio::test]
