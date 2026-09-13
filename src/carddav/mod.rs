@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::error::{Error, Result};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 const CARDDAV_BASE: &str = "https://carddav.fastmail.com";
 
@@ -29,7 +30,7 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
 /// A contact parsed from vCard
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Contact {
-    /// Unique ID (from UID property)
+    /// UID, or an opaque resource identifier when the card has no UID.
     pub id: String,
     /// Full name (FN property)
     pub name: String,
@@ -82,6 +83,13 @@ pub struct CardDavClient {
     username: String,
     app_password: String,
     server: Option<crate::remote::HttpServer>,
+    base_url: String,
+}
+
+struct ContactResource {
+    href: String,
+    vcard: String,
+    etag: String,
 }
 
 impl CardDavClient {
@@ -95,6 +103,7 @@ impl CardDavClient {
             username,
             app_password,
             server: None,
+            base_url: CARDDAV_BASE.into(),
         }
     }
 
@@ -105,8 +114,8 @@ impl CardDavClient {
     }
 
     fn resource_url(&self, href: &str) -> Result<reqwest::Url> {
-        let base = reqwest::Url::parse(CARDDAV_BASE).unwrap();
-        if !href.starts_with('/') && !href.starts_with("https://") {
+        let base = reqwest::Url::parse(&self.base_url).unwrap();
+        if !href.starts_with('/') && !href.starts_with(&format!("{}://", base.scheme())) {
             return Err(Error::Server("Invalid CardDAV resource URL".into()));
         }
         let url = base
@@ -133,7 +142,7 @@ impl CardDavClient {
                 .await;
         }
         let encoded_user = utf8_percent_encode(&self.username, PATH_SEGMENT);
-        let url = format!("{}/dav/addressbooks/user/{}/", CARDDAV_BASE, encoded_user);
+        let url = format!("{}/dav/addressbooks/user/{}/", self.base_url, encoded_user);
 
         let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -277,14 +286,31 @@ impl CardDavClient {
                 .descendants()
                 .find(|n| n.has_tag_name((carddav_ns, "address-data")))
                 .and_then(|n| n.text())
-                && let Some(contact) = parse_vcard(vcard_data)
             {
-                contacts.push(contact);
+                let href = response
+                    .descendants()
+                    .find(|n| n.has_tag_name((dav_ns, "href")))
+                    .and_then(|n| n.text())
+                    .unwrap_or_default();
+                if let Some(contact) = self.contact_at(vcard_data, href)? {
+                    contacts.push(contact);
+                }
             }
         }
 
         contacts.sort_by_key(|c| c.name.to_lowercase());
         Ok(contacts)
+    }
+
+    fn contact_at(&self, vcard: &str, href: &str) -> Result<Option<Contact>> {
+        let Some(mut contact) = parse_vcard(vcard) else {
+            return Ok(None);
+        };
+        if contact.id.is_empty() {
+            let url = self.resource_url(href)?;
+            contact.id = format!("href:{}", URL_SAFE_NO_PAD.encode(url.as_str()));
+        }
+        Ok(Some(contact))
     }
 
     /// Search contacts by name or email
@@ -325,9 +351,7 @@ impl CardDavClient {
             .ok_or(Error::Server("No address books found".to_string()))
     }
 
-    /// Find a contact's CardDAV href and current vCard data by UID.
-    /// Returns (href, vcard_string) so we can PUT back to the same URL.
-    async fn find_contact_href(&self, contact_id: &str) -> Result<Option<(String, String)>> {
+    async fn find_contact_href(&self, contact_id: &str) -> Result<Option<ContactResource>> {
         let addressbooks = self.list_addressbooks().await?;
 
         for ab in addressbooks {
@@ -379,14 +403,20 @@ impl CardDavClient {
                     .find(|n| n.has_tag_name((carddav_ns, "address-data")))
                     .and_then(|n| n.text())
                 {
-                    let unfolded = unfold_vcard(vcard_data);
-                    for line in unfolded.lines() {
-                        if line.starts_with("UID") && line.contains(':') {
-                            let uid = line.split_once(':').map(|(_, v)| v).unwrap_or("");
-                            if uid == contact_id {
-                                return Ok(Some((href.to_string(), vcard_data.to_string())));
-                            }
-                        }
+                    if self
+                        .contact_at(vcard_data, href)?
+                        .is_some_and(|c| c.id == contact_id)
+                    {
+                        let etag = response.descendants()
+                            .find(|n| n.has_tag_name((dav_ns, "getetag")))
+                            .and_then(|n| n.text())
+                            .filter(|value| value.starts_with('"') && value.ends_with('"'))
+                            .ok_or_else(|| Error::Server("Contact has no strong ETag; refusing an unconditional mutation".into()))?;
+                        return Ok(Some(ContactResource {
+                            href: href.into(),
+                            vcard: vcard_data.into(),
+                            etag: etag.into(),
+                        }));
                     }
                 }
             }
@@ -471,47 +501,16 @@ impl CardDavClient {
                 )
                 .await;
         }
-        let (href, existing_vcard) = self
+        let resource = self
             .find_contact_href(contact_id)
             .await?
             .ok_or_else(|| Error::Server(format!("Contact not found: {contact_id}")))?;
 
-        // Parse existing contact to merge with
-        let existing = parse_vcard(&existing_vcard)
-            .ok_or_else(|| Error::Server("Failed to parse existing contact".to_string()))?;
-
-        let final_name = fields.name.unwrap_or(&existing.name);
-        let owned_emails;
-        let final_emails = match fields.emails {
-            Some(e) => e,
-            None => {
-                owned_emails = existing.emails;
-                &owned_emails
-            }
-        };
-        let owned_phones;
-        let final_phones = match fields.phones {
-            Some(p) => p,
-            None => {
-                owned_phones = existing.phones;
-                &owned_phones
-            }
-        };
-        let final_org = fields.organization.or(existing.organization.as_deref());
-        let final_title = fields.title.or(existing.title.as_deref());
-        let final_notes = fields.notes.or(existing.notes.as_deref());
-
-        let vcard = build_vcard(
-            contact_id,
-            final_name,
-            final_emails,
-            final_phones,
-            final_org,
-            final_title,
-            final_notes,
-        );
-
-        let url = self.resource_url(&href)?;
+        let vcard = update_vcard(&resource.vcard, fields)?;
+        let updated = self
+            .contact_at(&vcard, &resource.href)?
+            .ok_or_else(|| Error::Server("Updated contact must have a name".into()))?;
+        let url = self.resource_url(&resource.href)?;
         debug!(url = %url, "Updating contact");
 
         let response = self
@@ -519,6 +518,7 @@ impl CardDavClient {
             .put(url)
             .basic_auth(&self.username, Some(&self.app_password))
             .header("Content-Type", "text/vcard; charset=utf-8")
+            .header("If-Match", &resource.etag)
             .body(vcard)
             .send()
             .await?;
@@ -526,6 +526,11 @@ impl CardDavClient {
         let status = response.status();
         let text = read_response(response).await?;
 
+        if status.as_u16() == 412 {
+            return Err(Error::Server(
+                "Contact changed concurrently; fetch it again before updating".into(),
+            ));
+        }
         if !status.is_success() && status.as_u16() != 204 {
             return Err(Error::Server(format!(
                 "CardDAV PUT failed: {} - {}",
@@ -533,15 +538,7 @@ impl CardDavClient {
             )));
         }
 
-        Ok(Contact {
-            id: contact_id.to_string(),
-            name: final_name.to_string(),
-            emails: final_emails.to_vec(),
-            phones: final_phones.to_vec(),
-            organization: final_org.map(String::from),
-            title: final_title.map(String::from),
-            notes: final_notes.map(String::from),
-        })
+        Ok(updated)
     }
 
     /// Delete a contact by ID.
@@ -552,24 +549,30 @@ impl CardDavClient {
                 .contacts(serde_json::json!({"operation":"delete", "id":contact_id}))
                 .await;
         }
-        let (href, _) = self
+        let resource = self
             .find_contact_href(contact_id)
             .await?
             .ok_or_else(|| Error::Server(format!("Contact not found: {contact_id}")))?;
 
-        let url = self.resource_url(&href)?;
+        let url = self.resource_url(&resource.href)?;
         debug!(url = %url, "Deleting contact");
 
         let response = self
             .client
             .delete(url)
             .basic_auth(&self.username, Some(&self.app_password))
+            .header("If-Match", &resource.etag)
             .send()
             .await?;
 
         let status = response.status();
         let text = read_response(response).await?;
 
+        if status.as_u16() == 412 {
+            return Err(Error::Server(
+                "Contact changed concurrently; fetch it again before deleting".into(),
+            ));
+        }
         if !status.is_success() && status.as_u16() != 204 {
             return Err(Error::Server(format!(
                 "CardDAV DELETE failed: {} - {}",
@@ -703,11 +706,12 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
             }
         };
 
-        if line.starts_with("UID") && line.contains(':') {
+        let property = property_name(line);
+        if property.eq_ignore_ascii_case("UID") {
             id = extract_value(line);
-        } else if line.starts_with("FN") && line.contains(':') {
+        } else if property.eq_ignore_ascii_case("FN") {
             name = extract_value(line);
-        } else if line.starts_with("EMAIL") {
+        } else if property.eq_ignore_ascii_case("EMAIL") {
             // EMAIL;TYPE=work:bob@example.com or EMAIL:bob@example.com
             let label = if line.contains("TYPE=") {
                 line.split("TYPE=")
@@ -721,7 +725,7 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
             if !email.is_empty() {
                 emails.push(ContactEmail { email, label });
             }
-        } else if line.starts_with("TEL") {
+        } else if property.eq_ignore_ascii_case("TEL") {
             let label = if line.contains("TYPE=") {
                 line.split("TYPE=")
                     .nth(1)
@@ -735,11 +739,11 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
             if !number.is_empty() {
                 phones.push(ContactPhone { number, label });
             }
-        } else if line.starts_with("ORG") && line.contains(':') {
+        } else if property.eq_ignore_ascii_case("ORG") {
             organization = Some(extract_value(line));
-        } else if line.starts_with("TITLE") && line.contains(':') {
+        } else if property.eq_ignore_ascii_case("TITLE") {
             title = Some(extract_value(line));
-        } else if line.starts_with("NOTE") && line.contains(':') {
+        } else if property.eq_ignore_ascii_case("NOTE") {
             notes = Some(extract_value(line));
         }
     }
@@ -747,11 +751,6 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
     // Need at least a name
     if name.is_empty() {
         return None;
-    }
-
-    // Generate ID if not present
-    if id.is_empty() {
-        id = format!("{:x}", hash_id(&name));
     }
 
     Some(Contact {
@@ -765,12 +764,85 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
     })
 }
 
-/// Simple SipHash-based hash for generating stable contact IDs
-fn hash_id(s: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
+fn property_name(line: &str) -> &str {
+    line.split([';', ':'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+}
+
+fn update_vcard(existing: &str, fields: &ContactFields<'_>) -> Result<String> {
+    let changed = |name: &str| match name.to_ascii_uppercase().as_str() {
+        "FN" | "N" => fields.name.is_some(),
+        "EMAIL" => fields.emails.is_some(),
+        "TEL" => fields.phones.is_some(),
+        "ORG" => fields.organization.is_some(),
+        "TITLE" => fields.title.is_some(),
+        "NOTE" => fields.notes.is_some(),
+        _ => false,
+    };
+    let replacements = build_vcard(
+        "",
+        fields.name.unwrap_or(""),
+        fields.emails.unwrap_or(&[]),
+        fields.phones.unwrap_or(&[]),
+        fields.organization,
+        fields.title,
+        fields.notes,
+    );
+    // Keep untouched content lines, including their parameters, groups and folds.
+    let mut lines: Vec<String> = Vec::new();
+    for line in existing.split_inclusive('\n') {
+        if line.starts_with([' ', '\t']) && !lines.is_empty() {
+            lines.last_mut().unwrap().push_str(line);
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    let mut result = String::new();
+    let mut ended = false;
+    if !lines
+        .first()
+        .is_some_and(|line| line.trim_end().eq_ignore_ascii_case("BEGIN:VCARD"))
+        || !lines
+            .last()
+            .is_some_and(|line| line.trim_end().eq_ignore_ascii_case("END:VCARD"))
+        || lines
+            .iter()
+            .filter(|line| property_name(line).eq_ignore_ascii_case("BEGIN"))
+            .count()
+            != 1
+        || lines
+            .iter()
+            .filter(|line| property_name(line).eq_ignore_ascii_case("END"))
+            .count()
+            != 1
+    {
+        return Err(Error::Server(
+            "Expected one complete vCard for update".into(),
+        ));
+    }
+    for line in lines {
+        if line.trim_end().eq_ignore_ascii_case("END:VCARD") {
+            for replacement in replacements
+                .lines()
+                .filter(|line| changed(property_name(line)))
+            {
+                result.push_str(replacement);
+                result.push_str("\r\n");
+            }
+            ended = true;
+        }
+        if !changed(property_name(&line)) {
+            result.push_str(&line);
+        }
+    }
+    if !ended {
+        return Err(Error::Server("Contact has no END:VCARD marker".into()));
+    }
+    Ok(result)
 }
 
 /// Generate a UUID-like UID for new contacts
@@ -971,10 +1043,180 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_vcard_generates_id_when_missing() {
+    fn uidless_contacts_use_stable_distinct_resource_ids() {
         let vcard = "BEGIN:VCARD\nFN:No UID\nEND:VCARD";
-        let contact = parse_vcard(vcard).unwrap();
-        assert!(!contact.id.is_empty());
+        let client = CardDavClient::new("user".into(), "password".into());
+        let a = client.contact_at(vcard, "/books/a.vcf").unwrap().unwrap();
+        let b = client.contact_at(vcard, "/books/b.vcf").unwrap().unwrap();
+        assert!(a.id.starts_with("href:"));
+        assert_ne!(a.id, b.id);
+        assert_eq!(
+            a.id,
+            client
+                .contact_at(vcard, "https://carddav.fastmail.com/books/a.vcf")
+                .unwrap()
+                .unwrap()
+                .id
+        );
+    }
+
+    #[test]
+    fn contact_updates_preserve_unrequested_content_lines() {
+        let original = concat!(
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:contact\r\nFN:Original\r\nN:Family;Given;;;\r\n",
+            "ADR;TYPE=home:;;Street;City;;;\r\nBDAY:2000-01-01\r\n",
+            "PHOTO;ENCODING=b:YWJj\r\n ZGVm\r\nURL:https://example.test/\r\n",
+            "item1.EMAIL;TYPE=home:person@example.test\r\nitem1.X-ABLabel:Custom\r\n",
+            "X-CUSTOM:keep\r\nTITLE:Old\r\nEND:VCARD\r\n",
+        );
+        let updated = update_vcard(
+            original,
+            &ContactFields {
+                title: Some("New"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated, original.replace("TITLE:Old", "TITLE:New"));
+        let renamed = update_vcard(
+            original,
+            &ContactFields {
+                name: Some("New Name"),
+                emails: Some(&[]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!renamed.contains("item1.EMAIL"));
+        assert!(renamed.contains("FN:New Name\r\nN:Name;New;;;\r\n"));
+        assert!(renamed.contains("item1.X-ABLabel:Custom\r\n"));
+        assert!(renamed.contains("PHOTO;ENCODING=b:YWJj\r\n ZGVm\r\n"));
+    }
+
+    #[test]
+    fn contact_updates_reject_incomplete_or_multiple_cards() {
+        let fields = ContactFields {
+            title: Some("Updated"),
+            ..Default::default()
+        };
+        for original in [
+            "BEGIN:OTHER\nFN:Name\nEND:VCARD\n",
+            "BEGIN:VCARD\nFN:Name\n",
+            "BEGIN:VCARD\nFN:Name\nEND:VCARD\nBEGIN:VCARD\nFN:Other\nEND:VCARD\n",
+        ] {
+            assert!(update_vcard(original, &fields).is_err());
+        }
+    }
+
+    async fn contact_server(vcard: &str, etag: &str) -> (CardDavClient, wiremock::MockServer) {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        let mut client = CardDavClient::new("user".into(), "password".into());
+        client.base_url = server.uri();
+        Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(207).set_body_string(
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#
+        )).mount(&server).await;
+        Mock::given(method("REPORT")).respond_with(ResponseTemplate::new(207).set_body_string(format!(
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/contact.vcf</d:href><d:propstat><d:prop><d:getetag>{etag}</d:getetag><c:address-data><![CDATA[{vcard}]]></c:address-data></d:prop></d:propstat></d:response></d:multistatus>"#
+        ))).mount(&server).await;
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn uidless_resource_mutations_use_etags_and_preserve_data() {
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{header, method, path},
+        };
+        let original = "BEGIN:VCARD\nVERSION:3.0\nFN:Same Name\nBDAY:2000-01-01\nEND:VCARD\n";
+        let (client, server) = contact_server(original, "\"version-1\"").await;
+        for verb in ["PUT", "DELETE"] {
+            Mock::given(method(verb))
+                .and(path("/books/contact.vcf"))
+                .and(header("If-Match", "\"version-1\""))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let contact = client.list_contacts("/books/").await.unwrap().remove(0);
+        let updated = client
+            .update_contact(
+                &contact.id,
+                &ContactFields {
+                    title: Some("Updated"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.id, contact.id);
+        client.delete_contact(&contact.id).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let put = requests.iter().find(|r| r.method == "PUT").unwrap();
+        let body = std::str::from_utf8(&put.body).unwrap();
+        assert!(body.contains("BDAY:2000-01-01"));
+        assert!(body.contains("TITLE:Updated"));
+        assert!(!body.contains("UID:"));
+    }
+
+    #[tokio::test]
+    async fn contact_mutations_report_conflicts_and_refuse_missing_etags() {
+        use wiremock::{Mock, ResponseTemplate, matchers::method};
+        let original = "BEGIN:VCARD\nUID:contact\nFN:Name\nEND:VCARD\n";
+        let (client, server) = contact_server(original, "\"version-1\"").await;
+        for verb in ["PUT", "DELETE"] {
+            Mock::given(method(verb))
+                .respond_with(ResponseTemplate::new(412))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let fields = ContactFields {
+            title: Some("Updated"),
+            ..Default::default()
+        };
+        assert!(
+            client
+                .update_contact("contact", &fields)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("concurrently")
+        );
+        assert!(
+            client
+                .delete_contact("contact")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("concurrently")
+        );
+        let (client, server) = contact_server(original, "").await;
+        assert!(
+            client
+                .update_contact("contact", &fields)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("ETag")
+        );
+        assert!(
+            client
+                .delete_contact("contact")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("ETag")
+        );
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.method == "PUT" || r.method == "DELETE")
+        );
     }
 
     #[test]
