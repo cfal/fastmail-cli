@@ -8,6 +8,11 @@ spec.loader.exec_module(module)
 
 
 class ReleaseVersionTests(unittest.TestCase):
+    def test_repository_manifest(self):
+        with (Path(__file__).resolve().parents[2] / "Cargo.toml").open("rb") as manifest:
+            version = module.tomllib.load(manifest)["package"]["version"]
+        self.assertTrue(module.is_new_release(version, []))
+
     def test_ordering_and_existing_releases(self):
         releases = [{"tag_name": "v3.10.0", "draft": False, "prerelease": False}]
         self.assertTrue(module.is_new_release("4.0.0", releases))

@@ -22,35 +22,21 @@ clap = { version = "4.5.54", features = ["derive", "env"] }
 clap_complete = "4.5.65"
 dirs = "6.0.0"
 http = "1"
-image = {
-  version = "0.25",
-  default-features = false,
-  features = ["gif", "jpeg", "png", "webp"]
-}
-xberg = {
-  version = "~1.1.5",
-  features = [
-    "archives",
-    "email",
-    "excel",
-    "html",
-    "language-detection",
-    "office",
-    "pdf",
-    "xml"
-  ]
-}
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+xberg = { version = "~1.1.5", features = [
+  "archives",
+  "email",
+  "excel",
+  "html",
+  "language-detection",
+  "office",
+  "pdf",
+  "xml"
+] }
 open = "5"
 percent-encoding = "2"
-reqwest = {
-  version = "0.13.1",
-  default-features = false,
-  features = ["json", "rustls"]
-}
-rmcp = {
-  version = "1",
-  features = ["server", "transport-io", "transport-streamable-http-server"]
-}
+reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls"] }
+rmcp = { version = "1", features = ["server", "transport-io", "transport-streamable-http-server"] }
 roxmltree = "0.21.1"
 schemars = "1"
 serde = { version = "1.0.228", features = ["derive"] }
