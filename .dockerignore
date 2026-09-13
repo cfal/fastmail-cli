@@ -1,0 +1,9 @@
+.git
+target
+web/node_modules
+.env
+.env.*
+*.local.*
+users.toml
+config.toml
+**/__pycache__
