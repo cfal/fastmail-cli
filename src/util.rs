@@ -2,6 +2,20 @@ use crate::jmap::AttachmentData;
 use crate::models::EmailAddress;
 use std::path::Path;
 
+pub(crate) fn http_client() -> crate::error::Result<reqwest::Client> {
+    static CLIENT: std::sync::LazyLock<Result<reqwest::Client, reqwest::Error>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+        });
+    CLIENT
+        .as_ref()
+        .cloned()
+        .map_err(|e| crate::error::Error::Config(format!("Failed to initialize HTTP client: {e}")))
+}
+
 pub fn parse_addresses(input: &str) -> Vec<EmailAddress> {
     input
         .split(',')

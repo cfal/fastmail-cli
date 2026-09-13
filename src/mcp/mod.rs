@@ -34,19 +34,20 @@ use graphql::{CardDavCreds, FastmailSchema, SharedClient};
 /// re-run the JMAP session handshake on every tool call. Shared across sessions.
 type ClientCache = Arc<Mutex<HashMap<String, SharedClient>>>;
 
-async fn cached_client(cache: &ClientCache, token: &str) -> SharedClient {
-    cache
-        .lock()
-        .await
-        .entry(token.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(JmapClient::new(token.to_string()))))
-        .clone()
+async fn cached_client(cache: &ClientCache, token: &str) -> anyhow::Result<SharedClient> {
+    let mut cache = cache.lock().await;
+    if let Some(client) = cache.get(token) {
+        return Ok(client.clone());
+    }
+    let client = Arc::new(Mutex::new(JmapClient::new(token.to_string())?));
+    cache.insert(token.into(), client.clone());
+    Ok(client)
 }
 
 /// Ordinary operations authenticate on first use. Health probes own their
 /// handshake so cold failures can be reported as structured session status.
 async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedClient> {
-    let shared = cached_client(cache, token).await;
+    let shared = cached_client(cache, token).await?;
     {
         let mut client = shared.lock().await;
         if client.session().is_err() {
@@ -216,7 +217,7 @@ markAsRead, markAsSpam, and the remaining filter and sort options."
             );
         };
         let resolved = if is_local_query(&req.query, true, None) {
-            Ok(cached_client(&self.clients, token).await)
+            cached_client(&self.clients, token).await
         } else {
             client_for(&self.clients, token).await
         };
@@ -439,7 +440,9 @@ async fn build_http_request(
         // expired token surfaces in the response pane instead of stopping the
         // server booting.
         let client = if is_local_query(&req.query, true, req.operation_name.as_deref()) {
-            cached_client(&mcp.clients, token).await
+            cached_client(&mcp.clients, token)
+                .await
+                .map_err(|e| e.to_string())?
         } else {
             client_for(&mcp.clients, token)
                 .await

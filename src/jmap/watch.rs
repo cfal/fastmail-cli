@@ -403,7 +403,9 @@ mod tests {
 
     #[tokio::test]
     async fn zero_poll_is_rejected_before_network_access() {
-        let client = std::sync::Arc::new(tokio::sync::Mutex::new(JmapClient::new("test".into())));
+        let client = std::sync::Arc::new(tokio::sync::Mutex::new(
+            JmapClient::new("test".into()).unwrap(),
+        ));
         assert!(
             ArrivalWatcher::new(client, None, false, Some(Duration::ZERO))
                 .await

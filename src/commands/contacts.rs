@@ -4,12 +4,12 @@ use crate::models::Output;
 
 fn make_carddav_client() -> anyhow::Result<CardDavClient> {
     if let Some(server) = crate::remote::HttpServer::current() {
-        return Ok(CardDavClient::via_server(server));
+        return Ok(CardDavClient::via_server(server)?);
     }
     let config = Config::load()?;
     let username = config.get_username()?;
     let app_password = config.get_app_password()?;
-    Ok(CardDavClient::new(username, app_password))
+    Ok(CardDavClient::new(username, app_password)?)
 }
 
 /// Parse comma-separated emails into ContactEmail vec

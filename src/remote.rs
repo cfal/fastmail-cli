@@ -61,10 +61,7 @@ impl HttpServer {
         Ok(Self {
             base,
             authorization,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?,
+            client: crate::util::http_client()?,
         })
     }
 

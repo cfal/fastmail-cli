@@ -84,7 +84,7 @@ impl CardDavCreds {
         Ok(crate::carddav::CardDavClient::new(
             username.clone(),
             password.clone(),
-        ))
+        )?)
     }
 }
 

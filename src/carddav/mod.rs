@@ -93,24 +93,20 @@ struct ContactResource {
 }
 
 impl CardDavClient {
-    pub fn new(username: String, app_password: String) -> Self {
-        Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("Failed to build CardDAV client"),
+    pub fn new(username: String, app_password: String) -> Result<Self> {
+        Ok(Self {
+            client: crate::util::http_client()?,
             username,
             app_password,
             server: None,
             base_url: CARDDAV_BASE.into(),
-        }
+        })
     }
 
-    pub fn via_server(server: crate::remote::HttpServer) -> Self {
-        let mut client = Self::new(String::new(), String::new());
+    pub fn via_server(server: crate::remote::HttpServer) -> Result<Self> {
+        let mut client = Self::new(String::new(), String::new())?;
         client.server = Some(server);
-        client
+        Ok(client)
     }
 
     fn resource_url(&self, href: &str) -> Result<reqwest::Url> {
@@ -941,7 +937,7 @@ mod tests {
 
     #[test]
     fn resource_urls_cannot_redirect_credentials() {
-        let client = CardDavClient::new("test".into(), "secret".into());
+        let client = CardDavClient::new("test".into(), "secret".into()).unwrap();
         for href in [
             "@evil.example/dav/",
             "//evil.example/dav/",
@@ -1045,7 +1041,7 @@ mod tests {
     #[test]
     fn uidless_contacts_use_stable_distinct_resource_ids() {
         let vcard = "BEGIN:VCARD\nFN:No UID\nEND:VCARD";
-        let client = CardDavClient::new("user".into(), "password".into());
+        let client = CardDavClient::new("user".into(), "password".into()).unwrap();
         let a = client.contact_at(vcard, "/books/a.vcf").unwrap().unwrap();
         let b = client.contact_at(vcard, "/books/b.vcf").unwrap().unwrap();
         assert!(a.id.starts_with("href:"));
@@ -1111,7 +1107,7 @@ mod tests {
     async fn contact_server(vcard: &str, etag: &str) -> (CardDavClient, wiremock::MockServer) {
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
         let server = MockServer::start().await;
-        let mut client = CardDavClient::new("user".into(), "password".into());
+        let mut client = CardDavClient::new("user".into(), "password".into()).unwrap();
         client.base_url = server.uri();
         Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(207).set_body_string(
             r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#
@@ -1216,6 +1212,32 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|r| r.method == "PUT" || r.method == "DELETE")
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_transport_keeps_carddav_credentials_request_scoped() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(
+                ResponseTemplate::new(207).set_body_string(r#"<d:multistatus xmlns:d="DAV:"/>"#),
+            )
+            .mount(&server)
+            .await;
+        for username in ["alice", "bob"] {
+            let mut client = CardDavClient::new(username.into(), "password".into()).unwrap();
+            client.base_url = server.uri();
+            client.list_addressbooks().await.unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests[0].headers["authorization"],
+            "Basic YWxpY2U6cGFzc3dvcmQ="
+        );
+        assert_eq!(
+            requests[1].headers["authorization"],
+            "Basic Ym9iOnBhc3N3b3Jk"
         );
     }
 
