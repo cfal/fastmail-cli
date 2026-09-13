@@ -7,8 +7,9 @@
 # rather than compiling the crate a second time in here.
 ARG BIN_SOURCE=source
 
-# Build deps (clang/cmake) are for the kreuzberg / bundled-pdfium native build.
-FROM rust:1-bookworm AS builder
+# Native build tools are used by the TLS backend, not a downloaded PDF library.
+FROM rust:1.98.1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
+ENV CARGO_BUILD_JOBS=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang cmake pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -30,16 +31,13 @@ FROM bin-${BIN_SOURCE} AS bin
 
 # Distroless rather than a distro base: the binary is the only thing this image
 # needs to contain, so there is no shell, no package manager and no apt layer.
-# It is not `scratch` because three things rule that out, all verified against
-# this image:
+# It is not `scratch` because TLS needs the system CA store and the binary
+# dynamically links glibc:
 #
 #   - /etc/ssl/certs/ca-certificates.crt — reqwest resolves roots through
 #     rustls-native-certs, which reads the system trust store rather than
 #     carrying its own. Without it every TLS handshake fails.
-#   - libstdc++ / libgcc_s / libc — kreuzberg embeds pdfium and dlopens it at
-#     runtime, so a dynamic loader and the C++ runtime have to be present.
-#     That extract-and-dlopen is also why a fully static musl build is out.
-#   - /tmp — where pdfium is extracted on first use (std::env::temp_dir()).
+#   - libgcc_s / libc and the dynamic loader.
 #
 # glibc invariant: whatever builds the binary must be no newer than this base.
 # Symbol versioning is forward-compatible only, so a binary linked against a
@@ -47,11 +45,12 @@ FROM bin-${BIN_SOURCE} AS bin
 # comfortably above the ubuntu-24.04 runners CI builds on (2.39) and the
 # bookworm source path above (2.36). Bumping either end means re-checking both.
 # Note cc-debian12 is 2.36 and would not clear the runners.
-FROM gcr.io/distroless/cc-debian13
+FROM gcr.io/distroless/cc-debian13@sha256:9b615fff20e1a4fad29c2b30562580b212c7dd5e2225236735cca0070ed11c78
 
 # Absolute, not a bare name: there is no shell here to fall back on for PATH
 # resolution.
 COPY --from=bin /fastmail /usr/local/bin/fastmail
+USER 65532:65532
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/fastmail"]

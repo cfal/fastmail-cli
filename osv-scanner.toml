@@ -1,0 +1,9 @@
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0253"
+ignoreUntil = 2026-12-13
+reason = "async-graphql 7.2.1 depends on lru 0.16.4, but this application never instantiates LruCache: record loaders use HashMapCache and blob loaders use NoCache. Reassess before introducing LruCache. See SECURITY.md."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2026-12-13
+reason = "paste 1.0.15 is an unmaintained build-time macro dependency of biblatex via xberg. This is a maintenance advisory with no reported vulnerability or patched version. Reassess upstream replacement. See SECURITY.md."

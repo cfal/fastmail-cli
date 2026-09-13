@@ -18,11 +18,27 @@ on:
   schedule:
     - cron: "0 6 * * 1,4"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified main revision
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }} # radiosilence/fastmail-cli
+  IMAGE_NAME: ${{ github.repository }}
+  RUST_TOOLCHAIN: 1.98.1
+  CARGO_BUILD_JOBS: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   check:
@@ -30,9 +46,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           # Branch-scoped caches aren't readable from other branches, so a PR
@@ -47,6 +65,39 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Run tests
         run: cargo test --locked
+      - name: Release version tests
+        run: python3 .github/scripts/test_release_version.py
+
+  security:
+    name: Dependencies and browser assets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.11.0
+      - name: Audit and reproduce browser assets
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          npm audit
+          npm run build
+          git diff --exit-code -- dist
+          test -z "$(git ls-files --others --exclude-standard -- dist)"
+      - name: Scan locked Rust dependencies
+        env:
+          GOMAXPROCS: 1
+        run: |
+          curl -fsSL https://github.com/google/osv-scanner/releases/download/v2.5.1/osv-scanner_linux_amd64 -o "$RUNNER_TEMP/osv-scanner"
+          echo "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be  $RUNNER_TEMP/osv-scanner" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+          "$RUNNER_TEMP/osv-scanner" scan source --lockfile Cargo.lock
+          if rg 'LruCache' src; then
+            echo 'Reassess the lru advisory exception before using LruCache.'
+            exit 1
+          fi
 
   # Is Cargo.toml's version ahead of what's actually been shipped? Releases are
   # the source of truth, not tags: a tag can exist without a release, or be left
@@ -63,20 +114,12 @@ jobs:
       is_new: ${{ steps.v.outputs.is_new }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: v
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          LATEST=$(gh release view --json tagName -q .tagName 2>/dev/null || echo "")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
-          if [ "v$VERSION" = "$LATEST" ]; then
-            echo "is_new=false" >> $GITHUB_OUTPUT
-          else
-            echo "is_new=true" >> $GITHUB_OUTPUT
-          fi
-          echo "Cargo.toml v$VERSION, latest release ${LATEST:-none}"
+        run: python3 .github/scripts/release-version.py
 
   # One job, one compile, two outputs: this owns the Linux release build and
   # feeds the same binary straight into the Docker build. Splitting them would
@@ -112,9 +155,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.name }}
@@ -139,13 +184,13 @@ jobs:
           build-args: BIN_SOURCE=prebuilt
           # Baked into the tarball, so publish pushes what it loads untouched.
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ matrix.arch }}
-          outputs: type=docker,dest=/tmp/image-${{ matrix.arch }}.tar
+          outputs: type=docker,dest=${{ runner.temp }}/image-${{ matrix.arch }}.tar
       - name: Smoke test
         run: |
-          docker load -i /tmp/image-${{ matrix.arch }}.tar
+          docker load -i "$RUNNER_TEMP/image-${{ matrix.arch }}.tar"
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${{ matrix.arch }} --version
       - name: Package binary
-        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C dist fastmail
+        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C dist fastmail -C "$GITHUB_WORKSPACE" LICENSE -C "$GITHUB_WORKSPACE/web/dist" THIRD_PARTY_NOTICES.txt
       # A scheduled run compiles only to refresh the cache, so it has no reason
       # to leave a 90-day artefact behind twice a week.
       - name: Upload binary
@@ -155,10 +200,11 @@ jobs:
           name: bin-${{ matrix.name }}
           path: fastmail-cli-${{ matrix.name }}.tar.gz
       - name: Upload image
+        if: github.event_name != 'schedule'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: image-${{ matrix.arch }}
-          path: /tmp/image-${{ matrix.arch }}.tar
+          path: ${{ runner.temp }}/image-${{ matrix.arch }}.tar
           # Only publish reads these, minutes later.
           retention-days: 1
 
@@ -170,7 +216,7 @@ jobs:
   build-darwin:
     name: Build ${{ matrix.name }}
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: macos-latest
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
@@ -181,9 +227,11 @@ jobs:
             name: darwin-aarch64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -191,7 +239,7 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
-        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release fastmail
+        run: tar -czvf fastmail-cli-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release fastmail -C "$GITHUB_WORKSPACE" LICENSE -C "$GITHUB_WORKSPACE/web/dist" THIRD_PARTY_NOTICES.txt
       - name: Upload binary
         if: github.event_name != 'schedule'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -205,17 +253,41 @@ jobs:
   # pin one. Images go up first; the release announces them.
   publish:
     name: Publish
-    needs: [check, version, build-image, build-darwin]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [check, security, version, build-image, build-darwin]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.publish && needs.version.outputs.is_new == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.version.outputs.tag }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Refuse stale revisions or conflicting tags
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)" = "$GITHUB_SHA"
+          EXISTING=$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -1 | cut -f1)
+          test -z "$EXISTING" || test "$EXISTING" = "$GITHUB_SHA"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bin-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify platform artifacts and create checksums
+        run: |
+          test "$(find artifacts -name '*.tar.gz' | wc -l)" -eq 4
+          for platform in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-aarch64; do
+            tar -tzf "artifacts/fastmail-cli-$platform.tar.gz" | grep -x fastmail
+          done
+          cd artifacts
+          sha256sum *.tar.gz > SHA256SUMS
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: image-*
-          path: /tmp/images
+          path: ${{ runner.temp }}/images
           merge-multiple: true
       - uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
@@ -227,7 +299,7 @@ jobs:
       - name: Push arch images
         run: |
           for arch in amd64 arm64; do
-            docker load -i /tmp/images/image-$arch.tar
+            docker load -i "$RUNNER_TEMP/images/image-$arch.tar"
             docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-$arch
           done
       - name: Create :main and :sha-<short> manifests
@@ -248,17 +320,21 @@ jobs:
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-amd64 \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-arm64
           done
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.version.outputs.is_new == 'true'
-        with:
-          pattern: bin-*
-          path: artifacts
-          merge-multiple: true
       - name: Create Release
         if: needs.version.outputs.is_new == 'true'
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ${{ needs.version.outputs.tag }}
-          files: artifacts/*.tar.gz
+          target_commitish: ${{ github.sha }}
+          draft: true
+          fail_on_unmatched_files: true
+          body_path: RELEASE_NOTES.md
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
           generate_release_notes: true
+      - name: Publish complete release
+        run: |
+          test "$(gh release view "$TAG" --json assets --jq '.assets | length')" -eq 5
+          gh release edit "$TAG" --draft=false --latest
