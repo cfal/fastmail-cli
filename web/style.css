@@ -1,0 +1,20 @@
+body { margin: 0; }
+#graphiql { height: 100dvh; }
+.loading { padding: 24px; font: 16px system-ui, sans-serif; }
+
+@media (max-width: 700px) {
+  .graphiql-main { position: relative; min-width: 0; }
+  .graphiql-main > .graphiql-plugin {
+    position: absolute;
+    inset: 0;
+    width: 100% !important;
+    z-index: 5;
+    background: hsl(var(--color-base));
+  }
+  .graphiql-horizontal-drag-bar { display: none; }
+  .graphiql-sessions { width: 100%; min-width: 0; }
+  .graphiql-sessions > div:last-child { flex-direction: column; }
+  .graphiql-editors, .graphiql-response { width: 100% !important; flex: 1; min-width: 0; }
+  .graphiql-editors { min-height: 300px; }
+  .graphiql-response { min-height: 180px; }
+}

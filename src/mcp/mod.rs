@@ -22,6 +22,9 @@ type ToolResult = std::result::Result<CallToolResult, McpError>;
 
 pub mod graphql;
 mod http_security;
+mod graphiql_assets {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/dist/assets.rs"));
+}
 mod sdl;
 
 use graphql::{CardDavCreds, FastmailSchema, SharedClient};
@@ -313,13 +316,32 @@ struct HttpGraphqlRequest {
     operation_name: Option<String>,
 }
 
-/// The GraphiQL IDE page. GraphiQL itself is loaded from a CDN with pinned
-/// versions and SRI hashes — see `templates/graphiql.html`.
+/// The GraphiQL IDE uses locally embedded, lockfile-built assets.
 #[derive(askama::Template)]
 #[template(path = "graphiql.html")]
 struct GraphiqlPage<'a> {
     title: &'a str,
-    endpoint: &'a str,
+}
+
+async fn graphiql_asset(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Some((_, mime, bytes)) = graphiql_assets::ASSETS
+        .iter()
+        .find(|(path, _, _)| *path == name)
+    {
+        (
+            [
+                (http::header::CONTENT_TYPE, *mime),
+                (http::header::CONTENT_ENCODING, "gzip"),
+            ],
+            *bytes,
+        )
+            .into_response()
+    } else {
+        http::StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 /// Whether every top-level selection is an introspection field, and so can be
@@ -516,8 +538,8 @@ fn http_router(
         // error should stop the server rather than 500 on every hit.
         let ide = askama::Template::render(&GraphiqlPage {
             title: "Fastmail GraphQL",
-            endpoint: "/graphql",
         })?;
+        router = router.route("/assets/{name}", axum::routing::get(graphiql_asset));
         router = router.route(
             "/",
             axum::routing::get(move || {

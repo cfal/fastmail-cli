@@ -220,12 +220,24 @@ pub async fn guard(
     response
         .headers_mut()
         .insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    response.headers_mut().insert(header::CONTENT_SECURITY_POLICY,
+        "default-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'".parse().unwrap());
+    response
+        .headers_mut()
+        .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     response
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_loopback_is_an_allowed_host() {
+        let policy = HttpSecurity::new("[::1]:8080".parse().unwrap(), None, vec![]).unwrap();
+        assert!(policy.check_browser(&headers("[::1]:8080", Some("http://[::1]:8080"))));
+        assert!(!policy.check_browser(&headers("[::2]:8080", None)));
+    }
 
     fn headers(host: &str, origin: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();
