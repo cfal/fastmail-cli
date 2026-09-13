@@ -203,7 +203,7 @@ pub fn thread_connection(emails: Vec<GqlEmail>, args: PageArgs) -> Result<EmailC
 /// caller asked for, times the cost of each node.
 pub fn page_complexity(first: Option<i32>, last: Option<i32>, child_complexity: usize) -> usize {
     let requested = first.or(last).map(|n| n.max(0) as u32);
-    clamp_page(requested) as usize * child_complexity
+    (clamp_page(requested) as usize).saturating_mul(child_complexity)
 }
 
 /// Turn JMAP's `anchorNotFound` into advice the caller can act on.

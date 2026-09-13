@@ -46,10 +46,7 @@ pub struct CardDavCreds {
 impl CardDavCreds {
     /// Read from `~/.config/fastmail-cli/config.toml` and the environment.
     ///
-    /// The fallback for when a request carries no credential headers, exactly
-    /// as [`crate::mcp::local_token`] is for the token: running this yourself
-    /// picks up your own credentials, while a hosted deployment ships no local
-    /// config and every request must bring its own.
+    /// HTTP and stdio servers use these server-owned credentials.
     pub fn from_local_config() -> Self {
         let Ok(config) = crate::config::Config::load() else {
             return Self::default();
@@ -63,7 +60,29 @@ impl CardDavCreds {
     /// Both halves present, so a CardDAV request can at least be attempted.
     /// Says nothing about whether the credentials are *correct*.
     pub fn is_complete(&self) -> bool {
-        self.username.is_some() && self.app_password.is_some()
+        self.username.as_ref().is_some_and(|v| !v.is_empty())
+            && self.app_password.as_ref().is_some_and(|v| !v.is_empty())
+    }
+
+    pub fn client(&self) -> async_graphql::Result<crate::carddav::CardDavClient> {
+        let username = self
+            .username
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                async_graphql::Error::new("Username not configured for this request.")
+            })?;
+        let password = self
+            .app_password
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                async_graphql::Error::new("App password not configured for this request.")
+            })?;
+        Ok(crate::carddav::CardDavClient::new(
+            username.clone(),
+            password.clone(),
+        ))
     }
 }
 
@@ -80,18 +99,10 @@ const MAX_DEPTH: usize = 15;
 /// each with their own Fastmail token. The nonce store stays schema-level
 /// because send preview→confirm spans two separate requests.
 pub fn build_schema() -> FastmailSchema {
-    // Complexity is deliberately **not** capped. Resolvers still declare costs
-    // (the `complexity` attributes, priced so a document parse reads as far more
-    // expensive than a download) but those are guidance, surfaced in the field
-    // descriptions so a caller can choose a sensible page size — not a limit
-    // that refuses the query. Rejecting an expensive-but-legitimate request
-    // leaves the caller guessing at a threshold it cannot see.
-    //
-    // Depth stays capped: the graph contains cycles, and nothing else bounds
-    // them.
     Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
         .data(types::NonceStore::default())
         .limit_depth(MAX_DEPTH)
+        .limit_complexity(100_000)
         .finish()
 }
 

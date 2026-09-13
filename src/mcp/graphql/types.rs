@@ -491,7 +491,7 @@ impl GqlEmail {
     }
 
     /// The conversation this email belongs to, with every message in it.
-    #[graphql(complexity = "10 * child_complexity")]
+    #[graphql(complexity = "child_complexity.saturating_mul(10)")]
     async fn thread(&self, ctx: &Context<'_>) -> Result<Option<GqlThread>> {
         let Some(thread_id) = self.inner.thread_id.clone() else {
             return Ok(None);
@@ -560,7 +560,7 @@ impl GqlAttachment {
     }
     /// The raw bytes, base64-encoded. Downloads the blob and does nothing else,
     /// so it works for any attachment whatever its type.
-    #[graphql(complexity = "10 + child_complexity")]
+    #[graphql(complexity = "child_complexity.saturating_add(10)")]
     async fn base64(&self, ctx: &Context<'_>) -> Result<String> {
         let data = self.bytes(ctx).await?;
         Ok(base64::Engine::encode(
@@ -574,7 +574,7 @@ impl GqlAttachment {
     ///
     /// Resizing exists so a model isn't handed a 10MB photo; it costs a decode
     /// and re-encode, so it is priced above a plain download.
-    #[graphql(complexity = "20 + child_complexity")]
+    #[graphql(complexity = "child_complexity.saturating_add(20)")]
     async fn image(
         &self,
         ctx: &Context<'_>,
@@ -606,7 +606,7 @@ impl GqlAttachment {
     /// **This is the expensive field.** Extraction parses the whole document,
     /// so it is priced well above the download and should only be selected when
     /// the text is actually wanted. Nothing else on `Attachment` triggers it.
-    #[graphql(complexity = "50 + child_complexity")]
+    #[graphql(complexity = "child_complexity.saturating_add(50)")]
     async fn text(&self, ctx: &Context<'_>) -> Result<Option<String>> {
         let name = self.name.as_deref().unwrap_or("attachment");
         let data = self.bytes(ctx).await?;
@@ -944,17 +944,16 @@ fn evict(map: &mut std::collections::HashMap<String, Nonce>) {
     }
 }
 
-/// Fingerprint the compose params so we can detect param tampering between
-/// PREVIEW and CONFIRM. This is a non-cryptographic hash — it only needs to
-/// detect accidental drift, not defeat an attacker who already controls the
-/// process.
+/// Bind each length-delimited parameter to the confirmation nonce.
 pub fn params_fingerprint(parts: &[&str]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
     for part in parts {
-        part.hash(&mut hasher);
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
     }
-    format!("{:016x}", hasher.finish())
+    base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
 }
 
 /// Issue a new one-shot confirmation nonce for the given params.

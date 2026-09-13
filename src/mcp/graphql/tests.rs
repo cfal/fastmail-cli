@@ -676,20 +676,36 @@ async fn text_extracts_document_content() {
 }
 
 #[tokio::test]
-async fn expensive_queries_are_costed_but_not_refused() {
-    // Cost is guidance, not a gate. A wide fan-out of the most expensive field
-    // still runs — the price is declared so a caller can pick a sensible page
-    // size, not so the server can second-guess a legitimate request.
+async fn bounded_attachment_queries_remain_usable() {
     let server = mock_server(1).await;
     let resp = run(
         &server,
-        "{ emails(first: 100) { nodes { attachments { nodes { text base64 image } } } } }",
+        "{ emails(first: 25) { nodes { attachments { nodes { text base64 image } } } } }",
     )
     .await;
     assert!(
         resp.errors.is_empty(),
-        "complexity must not refuse a query: {:?}",
+        "ordinary attachment queries should remain usable: {:?}",
         resp.errors
+    );
+}
+
+#[tokio::test]
+async fn excessive_graphql_fanout_is_rejected_before_network_requests() {
+    let server = mock_server(1).await;
+    let response = run(&server, "{ emails(first: 100) { nodes { thread { emails(first: 100) { nodes { attachments { nodes { text base64 image } } } } } } } }").await;
+    assert!(
+        response
+            .errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("complex")),
+        "{:?}",
+        response.errors
+    );
+    assert!(calls(&server).await.is_empty());
+    assert_eq!(
+        super::connection::page_complexity(Some(100), None, usize::MAX),
+        usize::MAX
     );
 }
 
@@ -963,16 +979,18 @@ async fn depth_limit_leaves_realistic_queries_alone() {
 
 #[tokio::test]
 async fn deep_cyclic_queries_are_still_refused() {
-    // Depth remains capped even though complexity is not: the graph has cycles
-    // (email -> thread -> emails -> ...) and nothing else bounds them.
+    // Keep fanout at one to exercise depth independently of complexity.
     let server = mock_server(1).await;
 
-    // Ten laps of the cycle is well past MAX_DEPTH without hard-coding a shape.
-    let mut inner = "subject".to_string();
-    for _ in 0..10 {
-        inner = format!("thread {{ emails {{ {inner} }} }}");
+    let mut inner = "name".to_string();
+    for _ in 0..20 {
+        inner = format!("parent {{ {inner} }}");
     }
-    let resp = run(&server, &format!("{{ emails {{ nodes {{ {inner} }} }} }}")).await;
+    let resp = run(
+        &server,
+        &format!("{{ mailbox(name: \"INBOX\") {{ {inner} }} }}"),
+    )
+    .await;
 
     assert!(
         resp.errors
@@ -1749,5 +1767,315 @@ async fn contacts_and_session_agree_about_missing_credentials() {
             .any(|e| e.message.contains("Username not configured")),
         "got {:?}",
         resp.errors
+    );
+}
+
+#[tokio::test]
+async fn all_contact_mutations_require_request_scoped_credentials() {
+    let server = mock_server(1).await;
+    for query in [
+        "mutation { createContact(name: \"Test\") { id } }",
+        "mutation { updateContact(id: \"id\", name: \"Test\") { id } }",
+        "mutation { deleteContact(id: \"id\") { success } }",
+    ] {
+        for username in [None, Some("first@example.com"), Some("second@example.com")] {
+            let response = run_with_carddav(
+                &server,
+                query,
+                CardDavCreds {
+                    username: username.map(str::to_owned),
+                    app_password: None,
+                },
+            )
+            .await;
+            assert!(
+                response
+                    .errors
+                    .iter()
+                    .any(|error| error.message.contains("not configured for this request")),
+                "{:?}",
+                response.errors
+            );
+        }
+    }
+}
+
+async fn compose(
+    schema: &super::FastmailSchema,
+    client: SharedClient,
+    field: &str,
+    action: &str,
+    params: &Value,
+    token: Option<&str>,
+) -> Value {
+    let mut args = params
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect::<Vec<_>>();
+    args.push(format!("action: {action}"));
+    if let Some(token) = token {
+        args.push(format!("confirmationToken: {}", json!(token)));
+    }
+    let query = format!(
+        "mutation {{ {field}({}) {{ success preview confirmationToken error }} }}",
+        args.join(", ")
+    );
+    let response = schema
+        .execute(request(&query, client, CardDavCreds::default()))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    response.data.into_json().unwrap()[field].clone()
+}
+
+#[tokio::test]
+async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
+    let server = mock_server(1).await;
+    Mock::given(|req: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        body["methodCalls"].as_array().is_some_and(|calls| {
+            calls.iter().any(|c| {
+                matches!(
+                    c[0].as_str(),
+                    Some("Mailbox/get" | "Identity/get" | "Email/set")
+                )
+            })
+        })
+    })
+    .respond_with(|req: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        let responses: Vec<_> = body["methodCalls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                let payload = match c[0].as_str().unwrap() {
+                    "Mailbox/get" => json!({"list": [
+                        {"id":"sent", "name":"Sent", "role":"sent"},
+                        {"id":"drafts", "name":"Drafts", "role":"drafts"}
+                    ]}),
+                    "Identity/get" => {
+                        json!({"list": [{"id":"id1", "name":"Me", "email":"me@example.com"}]})
+                    }
+                    "Email/set" => json!({"created":{"email":{"id":"created"}}}),
+                    "EmailSubmission/set" => json!({"created":{"submission":{"id":"submitted"}}}),
+                    _ => panic!("Unexpected method: {}", c[0]),
+                };
+                json!([c[0], payload, c[2]])
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({"methodResponses":responses}))
+    })
+    .with_priority(1)
+    .mount(&server)
+    .await;
+    for field in ["sendEmail", "replyToEmail", "forwardEmail"] {
+        let schema = build_schema();
+        let client = client_for(&server);
+        let mut params = json!({"body":"approved body", "cc":"cc@example.com", "bcc":"bcc@example.com", "htmlBody":"<p>approved</p>"});
+        if field != "replyToEmail" {
+            params["to"] = json!("to@example.com");
+        }
+        if field == "sendEmail" {
+            params["subject"] = json!("approved subject");
+        } else {
+            params["emailId"] = json!("e0");
+        }
+        let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+        assert!(
+            preview["preview"]
+                .as_str()
+                .unwrap()
+                .contains("me@example.com")
+        );
+        let token = preview["confirmationToken"].as_str().unwrap();
+        let sent = compose(
+            &schema,
+            client.clone(),
+            field,
+            "CONFIRM",
+            &params,
+            Some(token),
+        )
+        .await;
+        assert_eq!(sent["success"], true, "{sent}");
+        let replay = compose(
+            &schema,
+            client.clone(),
+            field,
+            "CONFIRM",
+            &params,
+            Some(token),
+        )
+        .await;
+        assert_eq!(replay["success"], false);
+        let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+        let draft = compose(
+            &schema,
+            client,
+            field,
+            "DRAFT",
+            &params,
+            preview["confirmationToken"].as_str(),
+        )
+        .await;
+        assert_eq!(draft["success"], true, "{draft}");
+    }
+    let mut submissions = 0;
+    let mut creates = 0;
+    for req in server.received_requests().await.unwrap() {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        for call in body["methodCalls"].as_array().into_iter().flatten() {
+            if call[0] == "EmailSubmission/set" {
+                submissions += 1;
+            }
+            if call[0] != "Email/set" {
+                continue;
+            }
+            creates += 1;
+            let email = &call[1]["create"]["email"];
+            assert_eq!(email["cc"][0]["email"], "cc@example.com");
+            assert_eq!(email["bcc"][0]["email"], "bcc@example.com");
+            assert_eq!(email["from"][0]["email"], "me@example.com");
+            assert!(
+                email["bodyValues"]["textBody"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .contains("approved body")
+            );
+            assert_eq!(email["bodyValues"]["htmlBody"]["value"], "<p>approved</p>");
+        }
+    }
+    assert_eq!(creates, 6);
+    assert_eq!(submissions, 3);
+}
+
+#[tokio::test]
+async fn compose_confirmation_binds_every_argument() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    for field in ["sendEmail", "replyToEmail", "forwardEmail"] {
+        let schema = build_schema();
+        let mut params = json!({"body": "body", "cc": "cc@example.com", "bcc": "bcc@example.com", "from": "sender@example.com", "htmlBody": "<p>review me</p>"});
+        if field != "replyToEmail" {
+            params["to"] = json!("to@example.com");
+        }
+        if field == "sendEmail" {
+            params["subject"] = json!("subject");
+        } else {
+            params["emailId"] = json!("e0");
+        }
+        if field == "replyToEmail" {
+            params["all"] = json!(false);
+        }
+        for key in params.as_object().unwrap().keys() {
+            let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+            assert!(
+                preview["preview"]
+                    .as_str()
+                    .unwrap()
+                    .contains("<p>review me</p>")
+            );
+            let token = preview["confirmationToken"].as_str().unwrap();
+            let mut changed = params.clone();
+            changed[key] = if key == "all" {
+                json!(true)
+            } else {
+                json!("changed")
+            };
+            let confirmed = compose(
+                &schema,
+                client.clone(),
+                field,
+                "CONFIRM",
+                &changed,
+                Some(token),
+            )
+            .await;
+            assert_eq!(confirmed["success"], false, "{field}.{key}");
+            assert!(
+                confirmed["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Params changed"),
+                "{field}.{key}: {confirmed}"
+            );
+        }
+    }
+    assert!(
+        !calls(&server)
+            .await
+            .iter()
+            .any(|call| call.method.contains("/set"))
+    );
+}
+
+#[tokio::test]
+async fn compose_confirmation_cannot_cross_operations_or_accounts() {
+    let server = mock_server(1).await;
+    let schema = build_schema();
+    let params = json!({"to": "to@example.com", "subject": "e0", "body": "body"});
+    let preview = compose(
+        &schema,
+        client_for(&server),
+        "sendEmail",
+        "PREVIEW",
+        &params,
+        None,
+    )
+    .await;
+    let token = preview["confirmationToken"].as_str().unwrap();
+    let response = compose(
+        &schema,
+        client_for(&server),
+        "forwardEmail",
+        "CONFIRM",
+        &json!({"emailId": "e0", "to": "to@example.com", "body": "body"}),
+        Some(token),
+    )
+    .await;
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("Params changed")
+    );
+
+    let preview = compose(
+        &schema,
+        client_for(&server),
+        "sendEmail",
+        "PREVIEW",
+        &params,
+        None,
+    )
+    .await;
+    let token = preview["confirmationToken"].as_str().unwrap();
+    let mut second_session = session_json(&server.uri());
+    second_session["username"] = json!("second@example.com");
+    second_session["primaryAccounts"]["urn:ietf:params:jmap:mail"] = json!("acct2");
+    Mock::given(method("GET"))
+        .and(path("/jmap/session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(second_session))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let second = client_for(&server);
+    second.lock().await.authenticate().await.unwrap();
+    let response = compose(
+        &schema,
+        second,
+        "sendEmail",
+        "CONFIRM",
+        &params,
+        Some(token),
+    )
+    .await;
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("Params changed")
     );
 }

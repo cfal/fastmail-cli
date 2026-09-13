@@ -34,15 +34,25 @@ impl MutationRoot {
         let cc_addrs = cc.as_deref().map(parse_addresses).unwrap_or_default();
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
-        let params = [to.as_str(), subject.as_str(), body.as_str()];
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let mut client = client.lock().await;
+        let sender = client.resolve_my_email(from.as_deref()).await;
+        let binding = compose_binding(
+            &client,
+            "send",
+            serde_json::json!({
+                "to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs,
+                "subject": subject, "body": body, "html": html_body,
+                "from": from, "sender": sender,
+            }),
+        )?;
+        let params = [binding.as_str()];
 
         if matches!(action, SendAction::Preview) {
             let nonce = super::types::issue_nonce(nonce_store, &params).await;
             let mut preview =
                 format_send_preview(&to_addrs, &cc_addrs, &bcc_addrs, &subject, &body);
-            if html_body.is_some() {
-                preview.push_str("\n[HTML body included]");
-            }
+            append_compose_details(&mut preview, sender.as_deref(), html_body.as_deref());
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
@@ -65,9 +75,6 @@ impl MutationRoot {
         }
 
         let draft = matches!(action, SendAction::Draft);
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
-
         match client
             .send_email(
                 to_addrs,
@@ -77,7 +84,7 @@ impl MutationRoot {
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
                     bcc: bcc_addrs,
-                    from: from.as_deref(),
+                    from: sender.as_deref().or(from.as_deref()),
                     draft,
                     html_body,
                     attachments: vec![],
@@ -121,7 +128,6 @@ impl MutationRoot {
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
-        let params = [email_id.as_str(), body.as_str()];
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
 
@@ -152,6 +158,18 @@ impl MutationRoot {
             extra_cc,
         );
 
+        let binding = compose_binding(
+            &client,
+            "reply",
+            serde_json::json!({
+                "id": email_id, "to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs,
+                "subject": subject, "body": body, "html": html_body,
+                "from": from, "sender": my_email, "all": reply_all,
+                "message_id": original.message_id, "references": original.references,
+            }),
+        )?;
+        let params = [binding.as_str()];
+
         if matches!(action, SendAction::Preview) {
             let nonce = super::types::issue_nonce(nonce_store, &params).await;
             let in_reply_to = original
@@ -177,9 +195,7 @@ impl MutationRoot {
                 in_reply_to,
                 body
             );
-            if html_body.is_some() {
-                preview.push_str("\n[HTML body included]");
-            }
+            append_compose_details(&mut preview, my_email.as_deref(), html_body.as_deref());
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
@@ -210,7 +226,7 @@ impl MutationRoot {
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
                     bcc: bcc_addrs,
-                    from: from.as_deref(),
+                    from: my_email.as_deref().or(from.as_deref()),
                     draft,
                     html_body,
                     attachments: vec![],
@@ -255,7 +271,6 @@ impl MutationRoot {
     ) -> Result<GqlComposeResult> {
         let body_str = body.as_deref().unwrap_or("");
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
-        let params = [email_id.as_str(), to.as_str(), body_str];
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
 
@@ -274,10 +289,24 @@ impl MutationRoot {
             format!("Fwd: {}", original.subject.as_deref().unwrap_or(""))
         };
 
+        let sender = client.resolve_my_email(from.as_deref()).await;
+        let binding = compose_binding(
+            &client,
+            "forward",
+            serde_json::json!({
+                "id": email_id, "to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs,
+                "subject": subject, "body": body_str, "html": html_body,
+                "from": from, "sender": sender,
+                "original_body": original.text_content(), "original_from": original.from,
+                "original_date": original.received_at, "original_subject": original.subject,
+            }),
+        )?;
+        let params = [binding.as_str()];
+
         if matches!(action, SendAction::Preview) {
             let nonce = super::types::issue_nonce(nonce_store, &params).await;
             let original_body = original.text_content().unwrap_or_default();
-            let sender = format_addrs(&original.from.clone().unwrap_or_default());
+            let original_sender = format_addrs(&original.from.clone().unwrap_or_default());
 
             let mut preview = format!(
                 "FORWARD PREVIEW:\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\nForwarding from: {}\n\n--- Your Message ---\n{}\n\n--- Forwarded ---\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
@@ -293,16 +322,14 @@ impl MutationRoot {
                     format_addrs(&bcc_addrs)
                 },
                 subject,
-                sender,
+                original_sender,
                 body_str,
-                sender,
+                original_sender,
                 original.received_at.as_deref().unwrap_or("unknown"),
                 original.subject.as_deref().unwrap_or(""),
                 original_body,
             );
-            if html_body.is_some() {
-                preview.push_str("\n[HTML body included]");
-            }
+            append_compose_details(&mut preview, sender.as_deref(), html_body.as_deref());
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
@@ -333,7 +360,7 @@ impl MutationRoot {
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
                     bcc: bcc_addrs,
-                    from: from.as_deref(),
+                    from: sender.as_deref().or(from.as_deref()),
                     draft,
                     html_body,
                     attachments: vec![],
@@ -576,6 +603,7 @@ impl MutationRoot {
     /// Create a new contact via CardDAV. Requires FASTMAIL_USERNAME and FASTMAIL_APP_PASSWORD.
     async fn create_contact(
         &self,
+        ctx: &Context<'_>,
         #[graphql(desc = "Full name")] name: String,
         #[graphql(desc = "Email address")] email: Option<String>,
         #[graphql(desc = "Phone number")] phone: Option<String>,
@@ -583,7 +611,7 @@ impl MutationRoot {
         #[graphql(desc = "Job title")] title: Option<String>,
         #[graphql(desc = "Notes")] notes: Option<String>,
     ) -> Result<GqlContact> {
-        let (client, emails, phones) = build_carddav_context(email, phone)?;
+        let (client, emails, phones) = build_carddav_context(ctx, email, phone)?;
 
         let contact = client
             .create_contact(&crate::carddav::ContactFields {
@@ -601,6 +629,7 @@ impl MutationRoot {
     /// Update an existing contact via CardDAV. Only provided fields are changed; others are preserved.
     async fn update_contact(
         &self,
+        ctx: &Context<'_>,
         #[graphql(desc = "Contact ID (UID from the vCard)")] id: String,
         #[graphql(desc = "New full name")] name: Option<String>,
         #[graphql(desc = "New email address (replaces existing)")] email: Option<String>,
@@ -609,7 +638,7 @@ impl MutationRoot {
         #[graphql(desc = "New job title")] title: Option<String>,
         #[graphql(desc = "New notes")] notes: Option<String>,
     ) -> Result<GqlContact> {
-        let (client, emails, phones) = build_carddav_context(email, phone)?;
+        let (client, emails, phones) = build_carddav_context(ctx, email, phone)?;
 
         let emails_ref = if emails.is_empty() {
             None
@@ -641,19 +670,10 @@ impl MutationRoot {
     /// Delete a contact via CardDAV. Cannot be undone!
     async fn delete_contact(
         &self,
+        ctx: &Context<'_>,
         #[graphql(desc = "Contact ID (UID from the vCard)")] id: String,
     ) -> Result<GqlStatus> {
-        let config = crate::config::Config::load()?;
-        let username = config.get_username().map_err(|_| {
-            async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
-        })?;
-        let app_password = config.get_app_password().map_err(|_| {
-            async_graphql::Error::new(
-                "App password not configured. Set FASTMAIL_APP_PASSWORD env var.",
-            )
-        })?;
-
-        let client = crate::carddav::CardDavClient::new(username, app_password);
+        let client = ctx.data::<super::CardDavCreds>()?.client()?;
         match client.delete_contact(&id).await {
             Ok(()) => Ok(GqlStatus {
                 success: true,
@@ -672,6 +692,7 @@ impl MutationRoot {
 // ============ CardDAV helpers ============
 
 fn build_carddav_context(
+    ctx: &Context<'_>,
     email: Option<String>,
     phone: Option<String>,
 ) -> async_graphql::Result<(
@@ -679,15 +700,7 @@ fn build_carddav_context(
     Vec<crate::carddav::ContactEmail>,
     Vec<crate::carddav::ContactPhone>,
 )> {
-    let config = crate::config::Config::load()?;
-    let username = config.get_username().map_err(|_| {
-        async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
-    })?;
-    let app_password = config.get_app_password().map_err(|_| {
-        async_graphql::Error::new("App password not configured. Set FASTMAIL_APP_PASSWORD env var.")
-    })?;
-
-    let client = crate::carddav::CardDavClient::new(username, app_password);
+    let client = ctx.data::<super::CardDavCreds>()?.client()?;
 
     let emails: Vec<crate::carddav::ContactEmail> = email
         .map(|e| {
@@ -715,6 +728,26 @@ fn build_carddav_context(
 }
 
 // ============ Formatting helpers (preview only) ============
+
+fn compose_binding(
+    client: &crate::jmap::JmapClient,
+    operation: &str,
+    payload: serde_json::Value,
+) -> Result<String> {
+    let session = client.session()?;
+    Ok(serde_json::to_string(&serde_json::json!({
+        "operation": operation,
+        "account": [Some(session.username.as_str()), session.primary_account_id()],
+        "payload": payload,
+    }))?)
+}
+
+fn append_compose_details(preview: &mut String, sender: Option<&str>, html: Option<&str>) {
+    preview.push_str(&format!("\nFrom: {}", sender.unwrap_or("(unresolved)")));
+    if let Some(html) = html {
+        preview.push_str(&format!("\n--- HTML Body ---\n{html}"));
+    }
+}
 
 fn format_addrs(addrs: &[EmailAddress]) -> String {
     if addrs.is_empty() {
