@@ -91,6 +91,7 @@ impl CardDavCreds {
 /// unbounded depth would let one query walk forever. 15 is far past any useful
 /// query (mailbox → emails → thread → emails → attachments → text is 6).
 const MAX_DEPTH: usize = 15;
+pub(crate) const MAX_COMPLEXITY: usize = 100_000;
 
 /// Build the GraphQL schema with only the process-shared preview-nonce store.
 ///
@@ -102,7 +103,7 @@ pub fn build_schema() -> FastmailSchema {
     Schema::build(QueryRoot, MutationRoot, SubscriptionRoot)
         .data(types::NonceStore::default())
         .limit_depth(MAX_DEPTH)
-        .limit_complexity(100_000)
+        .limit_complexity(MAX_COMPLEXITY)
         .finish()
 }
 

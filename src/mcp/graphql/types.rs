@@ -491,7 +491,7 @@ impl GqlEmail {
     }
 
     /// The conversation this email belongs to, with every message in it.
-    #[graphql(complexity = "child_complexity.saturating_mul(10)")]
+    #[graphql(complexity = "child_complexity.saturating_mul(10).min(super::MAX_COMPLEXITY + 1)")]
     async fn thread(&self, ctx: &Context<'_>) -> Result<Option<GqlThread>> {
         let Some(thread_id) = self.inner.thread_id.clone() else {
             return Ok(None);
@@ -560,7 +560,7 @@ impl GqlAttachment {
     }
     /// The raw bytes, base64-encoded. Downloads the blob and does nothing else,
     /// so it works for any attachment whatever its type.
-    #[graphql(complexity = "child_complexity.saturating_add(10)")]
+    #[graphql(complexity = "child_complexity.saturating_add(10).min(super::MAX_COMPLEXITY + 1)")]
     async fn base64(&self, ctx: &Context<'_>) -> Result<String> {
         let data = self.bytes(ctx).await?;
         Ok(base64::Engine::encode(
@@ -574,7 +574,7 @@ impl GqlAttachment {
     ///
     /// Resizing exists so a model isn't handed a 10MB photo; it costs a decode
     /// and re-encode, so it is priced above a plain download.
-    #[graphql(complexity = "child_complexity.saturating_add(20)")]
+    #[graphql(complexity = "child_complexity.saturating_add(20).min(super::MAX_COMPLEXITY + 1)")]
     async fn image(
         &self,
         ctx: &Context<'_>,
@@ -606,7 +606,7 @@ impl GqlAttachment {
     /// **This is the expensive field.** Extraction parses the whole document,
     /// so it is priced well above the download and should only be selected when
     /// the text is actually wanted. Nothing else on `Attachment` triggers it.
-    #[graphql(complexity = "child_complexity.saturating_add(50)")]
+    #[graphql(complexity = "child_complexity.saturating_add(50).min(super::MAX_COMPLEXITY + 1)")]
     async fn text(&self, ctx: &Context<'_>) -> Result<Option<String>> {
         let name = self.name.as_deref().unwrap_or("attachment");
         let data = self.bytes(ctx).await?;

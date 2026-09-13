@@ -705,8 +705,21 @@ async fn excessive_graphql_fanout_is_rejected_before_network_requests() {
     assert!(calls(&server).await.is_empty());
     assert_eq!(
         super::connection::page_complexity(Some(100), None, usize::MAX),
-        usize::MAX
+        super::MAX_COMPLEXITY + 1
     );
+}
+
+#[tokio::test]
+async fn enormous_graphql_costs_cannot_overflow_the_upstream_accumulator() {
+    let mut inner = "subject".to_owned();
+    for _ in 0..25 {
+        inner = format!("thread {{ emails(first: 100) {{ nodes {{ {inner} }} }} }}");
+    }
+    let branch = format!("emails(first: 100) {{ nodes {{ {inner} }} }}");
+    let response = build_schema()
+        .execute(format!("{{ a:{branch} b:{branch} }}"))
+        .await;
+    assert!(!response.errors.is_empty());
 }
 
 #[tokio::test]
