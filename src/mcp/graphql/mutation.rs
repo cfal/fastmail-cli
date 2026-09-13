@@ -401,6 +401,7 @@ impl MutationRoot {
 
         match client.move_email(&email_id, &target.id).await {
             Ok(()) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: true,
                 message: Some(format!(
                     "Moved \"{}\" to {}",
@@ -410,6 +411,7 @@ impl MutationRoot {
                 error: None,
             }),
             Err(e) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: false,
                 message: None,
                 error: Some(e.to_string()),
@@ -435,6 +437,7 @@ impl MutationRoot {
             Ok(()) => {
                 let status = if read { "read" } else { "unread" };
                 Ok(GqlStatus {
+                    confirmation_token: None,
                     success: true,
                     message: Some(format!(
                         "Marked \"{}\" as {status}",
@@ -444,6 +447,7 @@ impl MutationRoot {
                 })
             }
             Err(e) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: false,
                 message: None,
                 error: Some(e.to_string()),
@@ -457,10 +461,29 @@ impl MutationRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID")] email_id: String,
         #[graphql(desc = "PREVIEW first, then CONFIRM")] action: SpamAction,
+        #[graphql(desc = "One-shot token from PREVIEW, required for CONFIRM")]
+        confirmation_token: Option<String>,
     ) -> Result<GqlStatus> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
-
+        let store = ctx.data::<super::types::NonceStore>()?;
+        let binding = compose_binding(
+            &client,
+            "markAsSpam",
+            serde_json::json!({"emailId":email_id, "action":"CONFIRM"}),
+        )?;
+        let params = [binding.as_str()];
+        if matches!(action, SpamAction::Confirm)
+            && let Err(error) =
+                super::types::consume_nonce(store, confirmation_token.as_deref(), &params).await
+        {
+            return Ok(GqlStatus {
+                success: false,
+                message: None,
+                error: Some(error.into()),
+                confirmation_token: None,
+            });
+        }
         let email = client.get_email(&email_id).await?;
 
         if matches!(action, SpamAction::Preview) {
@@ -471,9 +494,10 @@ impl MutationRoot {
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "(unknown)".to_string());
             return Ok(GqlStatus {
+                confirmation_token: Some(super::types::issue_nonce(store, &params).await),
                 success: true,
                 message: Some(format!(
-                    "SPAM PREVIEW — This will:\n1. Move to Junk folder\n2. Train spam filter\n\nEmail: \"{}\"\nFrom: {}\n\nUse action=CONFIRM to proceed.",
+                    "SPAM PREVIEW — This will:\n1. Move to Junk folder\n2. Train spam filter\n\nEmail: \"{}\"\nFrom: {}\n\nUse action=CONFIRM with confirmationToken to proceed.",
                     email.subject.as_deref().unwrap_or("(no subject)"),
                     sender
                 )),
@@ -483,6 +507,7 @@ impl MutationRoot {
 
         match client.mark_spam(&email_id).await {
             Ok(()) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: true,
                 message: Some(format!(
                     "Marked as spam: \"{}\"",
@@ -491,6 +516,7 @@ impl MutationRoot {
                 error: None,
             }),
             Err(e) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: false,
                 message: None,
                 error: Some(e.to_string()),
@@ -531,11 +557,13 @@ impl MutationRoot {
             .await
         {
             Ok(()) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: true,
                 message: Some(format!("Masked email {id} enabled.")),
                 error: None,
             }),
             Err(e) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: false,
                 message: None,
                 error: Some(e.to_string()),
@@ -556,11 +584,13 @@ impl MutationRoot {
             .await
         {
             Ok(()) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: true,
                 message: Some(format!("Masked email {id} disabled.")),
                 error: None,
             }),
             Err(e) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: false,
                 message: None,
                 error: Some(e.to_string()),
@@ -581,11 +611,13 @@ impl MutationRoot {
             .await
         {
             Ok(()) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: true,
                 message: Some(format!("Masked email {id} deleted.")),
                 error: None,
             }),
             Err(e) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: false,
                 message: None,
                 error: Some(e.to_string()),
@@ -669,11 +701,13 @@ impl MutationRoot {
         let client = ctx.data::<super::CardDavCreds>()?.client()?;
         match client.delete_contact(&id).await {
             Ok(()) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: true,
                 message: Some(format!("Contact {id} deleted.")),
                 error: None,
             }),
             Err(e) => Ok(GqlStatus {
+                confirmation_token: None,
                 success: false,
                 message: None,
                 error: Some(e.to_string()),

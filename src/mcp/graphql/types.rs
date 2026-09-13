@@ -999,6 +999,8 @@ pub struct GqlStatus {
     pub success: bool,
     pub message: Option<String>,
     pub error: Option<String>,
+    /// One-shot approval token returned by a spam preview. Expires after 15 minutes.
+    pub confirmation_token: Option<String>,
 }
 
 /// A conversation: every email sharing a thread ID, oldest first. Each email is

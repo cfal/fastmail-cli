@@ -410,6 +410,78 @@ async fn mark_read_patches_only_seen_even_after_a_concurrent_keyword_change() {
     }
 }
 
+async fn spam(
+    schema: &super::FastmailSchema,
+    client: SharedClient,
+    id: &str,
+    action: &str,
+    token: Option<&str>,
+) -> Value {
+    let query = format!(
+        "mutation {{ markAsSpam(emailId:{}, action:{action}, confirmationToken:{}) {{ success error confirmationToken }} }}",
+        json!(id),
+        json!(token)
+    );
+    let response = schema
+        .execute(request(&query, client, CardDavCreds::default()))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    response.data.into_json().unwrap()["markAsSpam"].clone()
+}
+
+#[tokio::test]
+async fn spam_confirmation_requires_an_unexpired_one_shot_preview_for_the_same_email() {
+    use wiremock::matchers::body_string_contains;
+    let server = mock_server(2).await;
+    Mock::given(body_string_contains("Mailbox/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Mailbox/get", {"list":[{"id":"junk", "name":"Junk", "role":"junk"}]}, "m0"]]})))
+        .with_priority(1).mount(&server).await;
+    Mock::given(body_string_contains("Email/set"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"methodResponses":[["Email/set", {"updated":{"e0":null}}, "u0"]]}),
+        ))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let schema = build_schema();
+    let client = client_for(&server);
+    assert_eq!(
+        spam(&schema, client.clone(), "e0", "CONFIRM", None).await["success"],
+        false
+    );
+    let preview = spam(&schema, client.clone(), "e0", "PREVIEW", None).await;
+    let token = preview["confirmationToken"].as_str().unwrap();
+    assert_eq!(
+        spam(&schema, client.clone(), "e1", "CONFIRM", Some(token)).await["success"],
+        false
+    );
+
+    let preview = spam(&schema, client.clone(), "e0", "PREVIEW", None).await;
+    let token = preview["confirmationToken"].as_str().unwrap();
+    schema
+        .data::<super::types::NonceStore>()
+        .unwrap()
+        .lock()
+        .await
+        .get_mut(token)
+        .unwrap()
+        .issued_at = std::time::Instant::now() - std::time::Duration::from_secs(16 * 60);
+    let expired = spam(&schema, client.clone(), "e0", "CONFIRM", Some(token)).await;
+    assert!(expired["error"].as_str().unwrap().contains("expired"));
+
+    let preview = spam(&schema, client.clone(), "e0", "PREVIEW", None).await;
+    let token = preview["confirmationToken"].as_str().unwrap();
+    assert_eq!(
+        spam(&schema, client.clone(), "e0", "CONFIRM", Some(token)).await["success"],
+        true
+    );
+    assert_eq!(
+        spam(&schema, client, "e0", "CONFIRM", Some(token)).await["success"],
+        false
+    );
+}
+
 #[tokio::test]
 async fn listing_without_bodies_makes_no_extra_fetch() {
     let server = mock_server(5).await;
