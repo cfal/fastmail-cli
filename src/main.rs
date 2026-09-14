@@ -366,8 +366,11 @@ enum Commands {
         )]
         http: Option<String>,
 
-        /// Optional TOML file containing a [users] username/password table
-        #[arg(long, value_name = "PATH")]
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Optional TOML file containing a [users] username/password table"
+        )]
         auth_file: Option<std::path::PathBuf>,
 
         /// Allowed HTTP hostname (repeatable, without port)
@@ -396,8 +399,10 @@ enum MaskedCommands {
 
     /// Create a new masked email address
     Create {
-        /// Domain this masked email is for (e.g., https://example.com)
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Domain this masked email is for (e.g., https://example.com)"
+        )]
         domain: Option<String>,
 
         /// Description for the masked email
@@ -856,6 +861,44 @@ async fn run_command(command: Commands) -> anyhow::Result<()> {
                 }
                 None => mcp::run_server().await,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_definitions_are_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn help_text_keeps_toml_table_and_url_literals() {
+        let command = Cli::command();
+        for (path, id, expected) in [
+            (
+                &["mcp"][..],
+                "auth_file",
+                "Optional TOML file containing a [users] username/password table",
+            ),
+            (
+                &["masked", "create"][..],
+                "domain",
+                "Domain this masked email is for (e.g., https://example.com)",
+            ),
+        ] {
+            let mut subcommand = &command;
+            for name in path {
+                subcommand = subcommand.find_subcommand(name).unwrap();
+            }
+            let arg = subcommand
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .unwrap();
+            assert_eq!(arg.get_help().unwrap().to_string(), expected);
+            assert!(arg.get_long_help().is_none());
         }
     }
 }

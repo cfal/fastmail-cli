@@ -22,6 +22,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 - Small pure helpers retain tests beside their implementations, including GraphQL input limits, filters, SDL slicing, image bounds, and model serialization.
 - `tests/config.rs`: real configuration getters and persistence in child processes with isolated homes and environment variables.
 - `tests/http_cli.rs`: executable-level output, exit status, remote transport, downloads, and destructive-command confirmation.
+- `src/main.rs`: Clap argument-definition consistency and literal help text.
 - `tests/extraction.rs`: generated document fixtures for supported extraction formats.
 - `web/fetcher.test.js`: GraphiQL HTTP/SSE routing, cancellation, per-request headers, and failure propagation.
 - `.github/scripts/test_release_version.py`: release ordering, paginated GitHub results, workflow outputs, and fail-closed lookup behavior. GitHub calls are mocked.
