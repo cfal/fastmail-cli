@@ -229,6 +229,8 @@ async fn invalid_or_missing_senders_never_create_mail() {
     ]))
     .await;
     let home = tempfile::tempdir().unwrap();
+    let attachment = home.path().join("private.txt");
+    std::fs::write(&attachment, b"must not be uploaded").unwrap();
     let output = bounded_output(command(&server, home.path()).args([
         "send",
         "--to",
@@ -264,7 +266,9 @@ async fn invalid_or_missing_senders_never_create_mail() {
                 "Body",
                 "--from",
                 from,
-            ]);
+            ])
+            .arg("--attachment")
+            .arg(&attachment);
             if draft {
                 cmd.arg("--draft");
             }
@@ -275,13 +279,18 @@ async fn invalid_or_missing_senders_never_create_mail() {
             );
         }
     }
+    let mut identity_lookups = 0;
     for req in server.received_requests().await.unwrap() {
         assert_ne!(req.url.path(), "/cli/v1/upload");
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         for call in body["methodCalls"].as_array().into_iter().flatten() {
+            if call[0] == "Identity/get" {
+                identity_lookups += 1;
+            }
             assert!(!call[0].as_str().unwrap().ends_with("/set"), "{call}");
         }
     }
+    assert_eq!(identity_lookups, 9);
 }
 
 #[tokio::test]
