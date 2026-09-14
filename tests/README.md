@@ -5,6 +5,7 @@ Run the local test suite from the repository root:
 ```sh
 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked
 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --all-targets --locked -- -D warnings
+CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
 cargo fmt --check
 npm --prefix web ci
 npm --prefix web test

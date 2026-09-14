@@ -64,6 +64,10 @@ jobs:
       # well, so it only bought a second pass over the same crates.
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Check documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps
       - name: Run tests
         run: cargo test --locked
       - name: Release version tests
