@@ -152,6 +152,7 @@ mod tests {
     fn limits_syntax_before_parsing() {
         assert!(check_query(&"[".repeat(MAX_SYNTAX_DEPTH)).is_ok());
         assert!(check_query(&"[".repeat(MAX_SYNTAX_DEPTH + 1)).is_err());
+        assert!(check_query(&" ".repeat(MAX_QUERY_BYTES)).is_ok());
         assert!(check_query(&" ".repeat(MAX_QUERY_BYTES + 1)).is_err());
         assert!(
             check_query("{ emails(filter: {and: [{unread: true}]}) { nodes { id } } }").is_ok()
@@ -174,6 +175,35 @@ mod tests {
     async fn schema_uses_the_same_preparse_guard() {
         let response = super::super::build_schema().execute("[".repeat(33)).await;
         assert!(response.errors[0].message.contains("syntax nesting"));
+    }
+
+    #[tokio::test]
+    async fn literal_input_nesting_is_bounded_not_just_selection_depth() {
+        let mut filter = "{unread:true}".to_string();
+        for _ in 0..16 {
+            filter = format!("{{and:[{filter}]}}");
+        }
+        let query = format!("{{ emails(filter:{filter}) {{ nodes {{ id }} }} }}");
+        let response = super::super::build_schema().execute(query).await;
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(
+            response.errors[0].message,
+            "GraphQL syntax nesting exceeds 32 levels"
+        );
+    }
+
+    #[test]
+    fn scanner_handles_truncated_strings_and_cr_terminated_comments() {
+        let brackets = "[".repeat(MAX_SYNTAX_DEPTH + 1);
+        for ignored in [
+            format!("\"{brackets}\\"),
+            format!("\"\"\"{brackets}"),
+            format!("# {brackets}\r{{ __typename }}"),
+        ] {
+            assert!(check_query(&ignored).is_ok());
+        }
+        let after_comment = format!("# ignored\r{brackets}");
+        assert!(check_query(&after_comment).is_err());
     }
 
     #[test]
