@@ -9,7 +9,7 @@
 //! [`super::loaders`]), so sibling fields and list elements collapse into one
 //! batched API call instead of N sequential ones.
 
-use std::borrow::Cow;
+use std::sync::Arc;
 
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
 
@@ -18,7 +18,7 @@ use super::connection::{
     thread_connection,
 };
 use super::filter::{EmailFilter, EmailSort};
-use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
+use super::loaders::{Blobs, Mailboxes, Threads, load_emails, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
 use crate::models::{
     BodyPreference, Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights,
@@ -365,7 +365,7 @@ pub(crate) fn attachments_of(email: &Email) -> Vec<GqlAttachment> {
 /// the threading headers triggers a batched fetch of the full record for every
 /// email in the list at once — one extra API call, not one per email.
 pub struct GqlEmail {
-    inner: Email,
+    inner: Arc<Email>,
     /// Whether `inner` came from a full fetch (bodies + attachment metadata),
     /// as opposed to a list/search result carrying headers only.
     complete: bool,
@@ -380,6 +380,10 @@ impl GqlEmail {
 
     /// Wrap an email fetched with the full property set.
     pub fn full(email: Email) -> Self {
+        Self::full_shared(Arc::new(email))
+    }
+
+    pub(crate) fn full_shared(email: Arc<Email>) -> Self {
         Self {
             inner: email,
             complete: true,
@@ -389,25 +393,22 @@ impl GqlEmail {
     /// Wrap a list/search result. Body and attachment fields on it resolve lazily.
     pub fn summary(email: Email) -> Self {
         Self {
-            inner: email,
+            inner: Arc::new(email),
             complete: false,
         }
     }
 
-    /// The full record: borrowed when we already have it, otherwise batch-loaded.
-    async fn detail<'a>(&'a self, ctx: &Context<'_>) -> Result<Cow<'a, Email>> {
+    /// Share the full record, including while waiting for a conversion permit.
+    async fn detail(&self, ctx: &Context<'_>) -> Result<Arc<Email>> {
         if self.complete {
-            return Ok(Cow::Borrowed(&self.inner));
+            return Ok(self.inner.clone());
         }
-        let loader = ctx.data::<Emails>()?;
-        let full = loader
-            .load_one(self.inner.id.clone())
-            .await
-            .map_err(to_gql_error)?
+        load_emails(ctx, vec![self.inner.id.clone()])
+            .await?
+            .remove(&self.inner.id)
             .ok_or_else(|| {
                 async_graphql::Error::new(format!("Email {} no longer exists", self.inner.id))
-            })?;
-        Ok(Cow::Owned(full))
+            })
     }
 }
 
@@ -522,7 +523,6 @@ impl GqlEmail {
     ) -> Result<Option<ReadableBody>> {
         let email = self.detail(ctx).await?;
         let permit = BODY_CONVERSIONS.acquire().await?;
-        let email = email.into_owned();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             email.readable_body(format.into())
@@ -1157,7 +1157,6 @@ impl GqlThread {
     /// member IDs, then one batched `Email/get` for their content.
     pub async fn load(ctx: &Context<'_>, thread_id: String) -> Result<Self> {
         let threads = ctx.data::<Threads>()?;
-        let emails = ctx.data::<Emails>()?;
 
         let ids = threads
             .load_one(thread_id.clone())
@@ -1165,8 +1164,8 @@ impl GqlThread {
             .map_err(to_gql_error)?
             .unwrap_or_default();
 
-        let loaded = emails.load_many(ids).await.map_err(to_gql_error)?;
-        let mut emails: Vec<Email> = loaded.into_values().collect();
+        let loaded = load_emails(ctx, ids).await?;
+        let mut emails: Vec<Email> = loaded.into_values().map(|e| (*e).clone()).collect();
         emails.sort_by(|a, b| a.received_at.cmp(&b.received_at));
 
         Ok(Self {

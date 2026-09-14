@@ -6,17 +6,19 @@ use super::connection::{
     EmailConnection, ListConnection, PageArgs, emails_connection, page_complexity, paginate,
 };
 use super::filter::{EmailFilter, EmailSort};
-use super::loaders::{Emails, Identities, MaskedEmails, to_gql_error};
+use super::loaders::{Identities, MaskedEmails, load_emails, to_gql_error};
 use super::types::*;
 use super::{CardDavCreds, SharedClient};
 
 pub struct QueryRoot;
 
-async fn require_email(ctx: &Context<'_>, email_id: &str) -> Result<crate::models::Email> {
-    ctx.data::<Emails>()?
-        .load_one(email_id.to_string())
-        .await
-        .map_err(to_gql_error)?
+async fn require_email(
+    ctx: &Context<'_>,
+    email_id: &str,
+) -> Result<std::sync::Arc<crate::models::Email>> {
+    load_emails(ctx, vec![email_id.to_owned()])
+        .await?
+        .remove(email_id)
         .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))
 }
 
@@ -136,12 +138,10 @@ impl QueryRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "The email ID (from emails or searchEmails queries)")] id: String,
     ) -> Result<Option<GqlEmail>> {
-        let loader = ctx.data::<Emails>()?;
-        Ok(loader
-            .load_one(id)
-            .await
-            .map_err(to_gql_error)?
-            .map(GqlEmail::full))
+        Ok(load_emails(ctx, vec![id.clone()])
+            .await?
+            .remove(&id)
+            .map(GqlEmail::full_shared))
     }
 
     /// Get all emails in a thread/conversation with full content. Returns emails sorted
@@ -154,6 +154,7 @@ impl QueryRoot {
         let email = require_email(ctx, &email_id).await?;
         let thread_id = email
             .thread_id
+            .clone()
             .ok_or_else(|| async_graphql::Error::new("Email has no thread ID"))?;
         GqlThread::load(ctx, thread_id).await
     }

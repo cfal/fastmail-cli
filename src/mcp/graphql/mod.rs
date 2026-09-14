@@ -120,6 +120,7 @@ pub fn build_schema() -> FastmailSchema {
 pub fn request(query: &str, client: SharedClient, carddav: CardDavCreds) -> async_graphql::Request {
     let loaders = loaders::Loaders::new(client.clone());
     async_graphql::Request::new(query)
+        .data(loaders::shared_emails(client.clone()))
         .data(client)
         .data(carddav)
         .data(loaders.email)

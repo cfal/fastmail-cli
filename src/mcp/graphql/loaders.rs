@@ -47,6 +47,53 @@ impl Loader<String> for EmailLoader {
     }
 }
 
+// Keep the public by-value loader API, but share bodies between server resolvers.
+pub(crate) struct SharedEmailLoader(EmailLoader);
+
+impl Loader<String> for SharedEmailLoader {
+    type Value = Arc<Email>;
+    type Error = LoadError;
+
+    async fn load(&self, keys: &[String]) -> Result<HashMap<String, Arc<Email>>, Self::Error> {
+        Ok(self
+            .0
+            .load(keys)
+            .await?
+            .into_iter()
+            .map(|(id, email)| (id, Arc::new(email)))
+            .collect())
+    }
+}
+
+pub(crate) type SharedEmails = DataLoader<SharedEmailLoader, HashMapCache>;
+
+pub(crate) fn shared_emails(client: SharedClient) -> SharedEmails {
+    SharedEmails::with_cache(
+        SharedEmailLoader(EmailLoader(client)),
+        tokio::spawn,
+        HashMapCache::default(),
+    )
+    .max_batch_size(EMAIL_BATCH)
+}
+
+pub(crate) async fn load_emails(
+    ctx: &async_graphql::Context<'_>,
+    ids: Vec<String>,
+) -> async_graphql::Result<HashMap<String, Arc<Email>>> {
+    if let Some(loader) = ctx.data_opt::<SharedEmails>() {
+        return loader.load_many(ids).await.map_err(to_gql_error);
+    }
+    // Library callers may still inject the original public Loaders themselves.
+    Ok(ctx
+        .data::<Emails>()?
+        .load_many(ids)
+        .await
+        .map_err(to_gql_error)?
+        .into_iter()
+        .map(|(id, email)| (id, Arc::new(email)))
+        .collect())
+}
+
 /// Loads the account's whole mailbox list.
 ///
 /// JMAP offers no way to fetch mailboxes by id more cheaply than fetching the

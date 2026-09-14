@@ -1,6 +1,51 @@
 use super::*;
 
 #[tokio::test]
+async fn readable_body_loader_shares_bodies_across_waiters_and_cache_hits() {
+    use async_graphql::futures_util::future::join_all;
+    let server = mock_server(2).await;
+    let loader = super::super::loaders::shared_emails(client_for(&server));
+    let loaded = join_all((0..18).map(|_| loader.load_one("e0".to_owned()))).await;
+    let emails: Vec<_> = loaded.into_iter().map(|e| e.unwrap().unwrap()).collect();
+    assert!(emails.iter().all(|e| Arc::ptr_eq(e, &emails[0])));
+    assert_eq!(emails[0].text_content().as_deref(), Some("Body of e0"));
+    let cached = loader.load_one("e0".to_owned()).await.unwrap().unwrap();
+    assert!(Arc::ptr_eq(&cached, &emails[0]));
+    assert_eq!(calls(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn readable_body_supports_legacy_public_loader_injection() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let loaders = super::super::loaders::Loaders::new(client.clone());
+    let original: crate::models::Email = loaders
+        .email
+        .load_one("e0".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.id, "e0");
+    let response = build_schema()
+        .execute(
+            async_graphql::Request::new(
+                r#"{ email(id:"e0") { readableBody { content } textBody } }"#,
+            )
+            .data(client)
+            .data(loaders.email),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap()["email"],
+        json!({
+            "readableBody":{"content":"Body of e0"}, "textBody":"Body of e0"
+        })
+    );
+    assert_eq!(calls(&server).await.len(), 1);
+}
+
+#[tokio::test]
 async fn readable_bodies_are_lazy_batched_and_preserve_raw_graphql_fields() {
     use wiremock::matchers::body_string_contains;
     let server = mock_server(3).await;
