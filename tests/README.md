@@ -27,6 +27,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 - `tests/extraction.rs`: generated document fixtures for supported extraction formats.
 - `web/fetcher.test.js`: GraphiQL HTTP/SSE routing, cancellation, per-request headers, and failure propagation.
 - `.github/scripts/test_release_version.py`: release ordering, paginated GitHub results, workflow outputs, and fail-closed lookup behavior. GitHub calls are mocked.
+- `.github/scripts/test_lru_guard.py`: the dependency-policy source guard, including forbidden references, search errors, and missing Git.
 
 ## Conventions
 
