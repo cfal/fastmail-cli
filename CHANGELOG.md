@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-09-14
+
+### Added
+
+- Support optional HTTP Basic login in a percent-encoded `FASTMAIL_SERVER` URL,
+  while retaining the separate username/password settings. Reject mixed sources,
+  including empty-but-set credential variables.
+- Add repository agent guidance in `AGENTS.md` with a `CLAUDE.md` symlink.
+
+### Fixed
+
+- Strip URL credentials before constructing requests and hide server URL and
+  username environment values in CLI help. Reject empty URL logins, malformed
+  credentials, and raw URL control characters before normalization.
+- Expand regression coverage for URL parsing, credential encoding/redaction,
+  conflicting login sources, and authenticated remote CLI requests.
+
+### Changed
+
+- Enable fat LTO and optimization level 3 for release builds, retaining symbol
+  stripping.
+- Move the portable skill to `skills/fastmail-cli` and correct its authentication,
+  command, confirmation, and configuration guidance.
+
 ## [4.0.1] - 2026-09-14
 
 ### Fixed
