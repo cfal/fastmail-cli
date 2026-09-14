@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-09-14
+
 ### Added
 
 - Send from concrete addresses authorized by JMAP domain identities (`*@domain`),

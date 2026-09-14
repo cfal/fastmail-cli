@@ -1,29 +1,29 @@
-# v4.0.2
+# v4.0.3
 
-## HTTP Client Authentication
+## Domain-Wide Sending
 
-- Supply optional HTTP Basic credentials in one `FASTMAIL_SERVER` URL, using
-  percent-encoded username and password values. The separate `--server-user` /
-  `FASTMAIL_SERVER_USER` and `FASTMAIL_SERVER_PASSWORD` settings remain supported.
-- Strip URL credentials before constructing requests, keep authorization headers
-  sensitive and request-scoped, and hide server URL and username environment
-  values in CLI help.
-- Reject empty or malformed URL logins, raw URL control characters, and mixed
-  credential sources. Unset unused credential variables; empty values still
-  count as supplied. Encode reserved characters, including literal `%` as `%25`.
-- Expand tests for encoding, URL normalization, redaction, conflicting settings,
-  authenticated mail/contact commands, and redirect rejection.
+- Send from any concrete address authorized by a JMAP domain identity such as
+  `*@yourdomain.com`. Exact identities take precedence; domain matching excludes
+  subdomains and keeps the wildcard identity's submission ID.
+- Use `--from 'My Team <new-address@yourdomain.com>'` for a per-message display
+  name without creating or modifying a saved identity. The same behavior applies
+  to replies, forwards, drafts, and GraphQL/MCP compose mutations.
+- Keep the identity's saved name when `--from` is a bare address. Without
+  `--from`, use the first non-wildcard identity; wildcard-only accounts require
+  an explicit address to send.
 
-Authentication remains optional. HTTP callers still use the server-owned Fastmail
-account, with no direct fallback to local credentials. Use HTTPS for remote Basic
-authentication and protect credential-bearing URLs as secrets.
+## Sender Safety And Coverage
 
-## Builds And Agent Support
-
-- Enable fat LTO and optimization level 3 for release builds, retaining symbol
-  stripping.
-- Move and clean up the portable skill at `skills/fastmail-cli`.
-- Add repository working instructions in `AGENTS.md` and a `CLAUDE.md` symlink.
+- Reject malformed, multiple, and literal or quoted wildcard senders locally.
+  An explicit sender must resolve successfully before creating mail, including
+  drafts. Drafts without `--from` can still be saved when identity lookup fails.
+- Include sender names in GraphQL previews and confirmation bindings, preserve
+  the reviewed default when upstream identities are reordered, and exclude the
+  concrete sender from reply-all recipients.
+- Expand coverage for identity selection, per-message names across all compose
+  paths, confirmation binding, and rejected sends without account mutations.
+- Live smoke testing verified domain-wide delivery and the display name in the
+  received message's raw `From` header.
 
 Four platform archives include licenses; `SHA256SUMS` covers all four archives.
 The release also publishes Linux amd64/arm64 container manifests.
