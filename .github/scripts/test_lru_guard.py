@@ -22,11 +22,11 @@ class LruGuardTests(unittest.TestCase):
         (self.root / "src" / "lib.rs").write_text(source)
         subprocess.run(["git", "add", "src"], cwd=self.root, check=True)
 
-    def run_guard(self, env=None):
+    def run_guard(self, env_overrides=None):
         return subprocess.run(
             [BASH, str(SCRIPT.resolve())],
             cwd=self.root,
-            env=env,
+            env={**os.environ, **(env_overrides or {}), "LC_ALL": "C"},
             capture_output=True,
             text=True,
         )
@@ -36,7 +36,7 @@ class LruGuardTests(unittest.TestCase):
         tools = self.root / "bin"
         tools.mkdir()
         (tools / "git").symlink_to(shutil.which("git"))
-        result = self.run_guard({**os.environ, "PATH": str(tools)})
+        result = self.run_guard({"PATH": str(tools)})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
 
@@ -56,6 +56,7 @@ class LruGuardTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         result = self.run_guard()
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not match any file", result.stderr)
 
     def test_relocated_source_scope_fails(self):
         self.repository("type RecordCache = LruCache;\n")
@@ -65,10 +66,11 @@ class LruGuardTests(unittest.TestCase):
         )
         result = self.run_guard()
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not match any file", result.stderr)
 
     def test_missing_git_fails(self):
         self.repository("type RecordCache = HashMapCache;\n")
-        result = self.run_guard({**os.environ, "PATH": ""})
+        result = self.run_guard({"PATH": ""})
         self.assertNotEqual(result.returncode, 0)
         self.assertRegex(
             result.stderr, r"\bgit: (command not found|No such file or directory)"
