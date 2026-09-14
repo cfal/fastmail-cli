@@ -2,6 +2,7 @@
 
 use async_graphql::{Context, Object, Result};
 
+use crate::carddav::{ContactEmail, ContactPhone};
 use crate::models::EmailAddress;
 use crate::util::parse_addresses;
 
@@ -636,7 +637,9 @@ impl MutationRoot {
         #[graphql(desc = "Job title")] title: Option<String>,
         #[graphql(desc = "Notes")] notes: Option<String>,
     ) -> Result<GqlContact> {
-        let (client, emails, phones) = build_carddav_context(ctx, email, phone)?;
+        let client = ctx.data::<super::CardDavCreds>()?.client()?;
+        let emails = ContactEmail::parse_list(email.as_deref());
+        let phones = ContactPhone::parse_list(phone.as_deref());
 
         let contact = client
             .create_contact(&crate::carddav::ContactFields {
@@ -663,26 +666,17 @@ impl MutationRoot {
         #[graphql(desc = "New job title")] title: Option<String>,
         #[graphql(desc = "New notes")] notes: Option<String>,
     ) -> Result<GqlContact> {
-        let (client, emails, phones) = build_carddav_context(ctx, email, phone)?;
-
-        let emails_ref = if emails.is_empty() {
-            None
-        } else {
-            Some(emails.as_slice())
-        };
-        let phones_ref = if phones.is_empty() {
-            None
-        } else {
-            Some(phones.as_slice())
-        };
+        let client = ctx.data::<super::CardDavCreds>()?.client()?;
+        let emails = ContactEmail::parse_list(email.as_deref());
+        let phones = ContactPhone::parse_list(phone.as_deref());
 
         let contact = client
             .update_contact(
                 &id,
                 &crate::carddav::ContactFields {
                     name: name.as_deref(),
-                    emails: emails_ref,
-                    phones: phones_ref,
+                    emails: (!emails.is_empty()).then_some(emails.as_slice()),
+                    phones: (!phones.is_empty()).then_some(phones.as_slice()),
                     organization: organization.as_deref(),
                     title: title.as_deref(),
                     notes: notes.as_deref(),
@@ -714,44 +708,6 @@ impl MutationRoot {
             }),
         }
     }
-}
-
-// ============ CardDAV helpers ============
-
-fn build_carddav_context(
-    ctx: &Context<'_>,
-    email: Option<String>,
-    phone: Option<String>,
-) -> async_graphql::Result<(
-    crate::carddav::CardDavClient,
-    Vec<crate::carddav::ContactEmail>,
-    Vec<crate::carddav::ContactPhone>,
-)> {
-    let client = ctx.data::<super::CardDavCreds>()?.client()?;
-
-    let emails: Vec<crate::carddav::ContactEmail> = email
-        .map(|e| {
-            e.split(',')
-                .map(|addr| crate::carddav::ContactEmail {
-                    email: addr.trim().to_string(),
-                    label: None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let phones: Vec<crate::carddav::ContactPhone> = phone
-        .map(|p| {
-            p.split(',')
-                .map(|num| crate::carddav::ContactPhone {
-                    number: num.trim().to_string(),
-                    label: None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Ok((client, emails, phones))
 }
 
 // ============ Formatting helpers (preview only) ============

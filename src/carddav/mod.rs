@@ -52,10 +52,36 @@ pub struct ContactEmail {
     pub label: Option<String>,
 }
 
+impl ContactEmail {
+    pub(crate) fn parse_list(input: Option<&str>) -> Vec<Self> {
+        input
+            .into_iter()
+            .flat_map(|value| value.split(','))
+            .map(|email| Self {
+                email: email.trim().to_string(),
+                label: None,
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContactPhone {
     pub number: String,
     pub label: Option<String>,
+}
+
+impl ContactPhone {
+    pub(crate) fn parse_list(input: Option<&str>) -> Vec<Self> {
+        input
+            .into_iter()
+            .flat_map(|value| value.split(','))
+            .map(|number| Self {
+                number: number.trim().to_string(),
+                label: None,
+            })
+            .collect()
+    }
 }
 
 /// Address book info
@@ -942,6 +968,34 @@ fn build_vcard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contact_input_lists_preserve_empty_components_and_trim_values() {
+        for (input, expected) in [
+            (None, vec![]),
+            (Some(""), vec![""]),
+            (Some(" a , ,b, "), vec!["a", "", "b", ""]),
+        ] {
+            let emails = ContactEmail::parse_list(input);
+            assert_eq!(
+                emails
+                    .iter()
+                    .map(|entry| entry.email.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+            );
+            assert!(emails.iter().all(|entry| entry.label.is_none()));
+            let phones = ContactPhone::parse_list(input);
+            assert_eq!(
+                phones
+                    .iter()
+                    .map(|entry| entry.number.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+            );
+            assert!(phones.iter().all(|entry| entry.label.is_none()));
+        }
+    }
 
     #[test]
     fn resource_urls_cannot_redirect_credentials() {

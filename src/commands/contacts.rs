@@ -12,34 +12,6 @@ fn make_carddav_client() -> anyhow::Result<CardDavClient> {
     Ok(CardDavClient::try_new(username, app_password)?)
 }
 
-/// Parse comma-separated emails into ContactEmail vec
-fn parse_emails(input: Option<&str>) -> Vec<ContactEmail> {
-    input
-        .map(|e| {
-            e.split(',')
-                .map(|addr| ContactEmail {
-                    email: addr.trim().to_string(),
-                    label: None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Parse comma-separated phones into ContactPhone vec
-fn parse_phones(input: Option<&str>) -> Vec<ContactPhone> {
-    input
-        .map(|p| {
-            p.split(',')
-                .map(|num| ContactPhone {
-                    number: num.trim().to_string(),
-                    label: None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// List all contacts from all address books
 pub async fn list_contacts() -> anyhow::Result<()> {
     let client = make_carddav_client()?;
@@ -77,8 +49,8 @@ pub async fn create_contact(
     notes: Option<&str>,
 ) -> anyhow::Result<()> {
     let client = make_carddav_client()?;
-    let emails = parse_emails(email);
-    let phones = parse_phones(phone);
+    let emails = ContactEmail::parse_list(email);
+    let phones = ContactPhone::parse_list(phone);
 
     let contact = client
         .create_contact(&ContactFields {
@@ -106,27 +78,16 @@ pub async fn update_contact(
     notes: Option<&str>,
 ) -> anyhow::Result<()> {
     let client = make_carddav_client()?;
-    let emails = parse_emails(email);
-    let phones = parse_phones(phone);
-
-    let emails_ref = if emails.is_empty() {
-        None
-    } else {
-        Some(emails.as_slice())
-    };
-    let phones_ref = if phones.is_empty() {
-        None
-    } else {
-        Some(phones.as_slice())
-    };
+    let emails = ContactEmail::parse_list(email);
+    let phones = ContactPhone::parse_list(phone);
 
     let contact = client
         .update_contact(
             contact_id,
             &ContactFields {
                 name,
-                emails: emails_ref,
-                phones: phones_ref,
+                emails: (!emails.is_empty()).then_some(emails.as_slice()),
+                phones: (!phones.is_empty()).then_some(phones.as_slice()),
                 organization,
                 title,
                 notes,
