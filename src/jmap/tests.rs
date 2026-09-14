@@ -509,6 +509,29 @@ fn sender_name_is_a_per_message_override() {
 }
 
 #[test]
+fn quoted_sender_names_decode_quotes_and_quoted_pairs() {
+    for (from, expected) in [
+        (r#""Doe, John" <new@example.com>"#, "Doe, John"),
+        (r#""John \"JJ\" Doe" <new@example.com>"#, "John \"JJ\" Doe"),
+        (r#""Back\\Slash" <new@example.com>"#, "Back\\Slash"),
+        (r#""Escaped\ Space" <new@example.com>"#, "Escaped Space"),
+        (r#""" <new@example.com>"#, ""),
+        ("Doe, John <new@example.com>", "Doe, John"),
+    ] {
+        for identity_email in ["new@example.com", "*@example.com"] {
+            let identity = pick_identity(
+                vec![test_identity("id", identity_email, "Saved Name")],
+                Some(from),
+            )
+            .unwrap();
+            assert_eq!(identity.id, "id");
+            assert_eq!(identity.email, "new@example.com");
+            assert_eq!(identity.name, expected, "{from}");
+        }
+    }
+}
+
+#[test]
 fn domain_identity_rejects_other_domains_and_nonconcrete_senders() {
     for from in [
         "new@sub.example.com",
@@ -528,6 +551,9 @@ fn domain_identity_rejects_other_domains_and_nonconcrete_senders() {
         "new@example.com <other@example.com>",
         "New <new@example.com> trailing",
         "New <new@example.com",
+        r#""Unclosed <new@example.com>"#,
+        r#""Unescaped "quote"" <new@example.com>"#,
+        r#""Dangling\" <new@example.com>"#,
         "New\r\nBcc: other@example.com <new@example.com>",
         ".new@example.com",
         "new..name@example.com",
@@ -573,7 +599,7 @@ fn invalid_sender_errors_identify_the_from_argument() {
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Config error: Invalid --from: use one concrete email address or Name <address>"
+            "Config error: Invalid sender (--from or GraphQL from): use one concrete email address or Name <address>"
         );
     }
 }

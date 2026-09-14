@@ -522,8 +522,12 @@ fn pick_identity(identities: Vec<Identity>, from: Option<&str>) -> Result<Identi
             .find(|identity| !identity.email.starts_with("*@"))
             .ok_or(Error::IdentityNotFound);
     };
-    let invalid =
-        || Error::Config("Invalid --from: use one concrete email address or Name <address>".into());
+    let invalid = || {
+        Error::Config(
+            "Invalid sender (--from or GraphQL from): use one concrete email address or Name <address>"
+                .into(),
+        )
+    };
     if from.chars().any(char::is_control) {
         return Err(invalid());
     }
@@ -551,7 +555,21 @@ fn pick_identity(identities: Vec<Identity>, from: Option<&str>) -> Result<Identi
         identity.email = email;
     }
     if !name.is_empty() {
-        identity.name = name.to_string();
+        identity.name = if let Some(quoted) = name.strip_prefix('"') {
+            let quoted = quoted.strip_suffix('"').ok_or_else(invalid)?;
+            let mut chars = quoted.chars();
+            let mut decoded = String::with_capacity(quoted.len());
+            while let Some(ch) = chars.next() {
+                decoded.push(match ch {
+                    '\\' => chars.next().ok_or_else(invalid)?,
+                    '"' => return Err(invalid()),
+                    _ => ch,
+                });
+            }
+            decoded
+        } else {
+            name.to_string()
+        };
     }
     Ok(identity)
 }

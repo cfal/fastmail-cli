@@ -18,6 +18,8 @@
   for drafts, including when identity lookup is unavailable.
 - Pin the full resolved sender identity through GraphQL confirmation and
   execution, including when multiple identities share the same address.
+- Decode quoted sender display names and quoted-pair escapes before building
+  the message's `From` field.
 
 ## [4.0.2] - 2026-09-14
 

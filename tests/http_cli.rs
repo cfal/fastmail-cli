@@ -164,11 +164,15 @@ async fn domain_sender_and_name_reach_send_reply_forward_and_drafts() {
             "Body",
         ],
     ] {
-        for draft in [false, true] {
+        for (draft, from) in [
+            (false, "Fastmail-CLI Tester <New+tag@Example.COM>"),
+            (true, "Fastmail-CLI Tester <New+tag@Example.COM>"),
+            (false, r#""Fastmail-CLI Tester" <New+tag@Example.COM>"#),
+            (true, r#""Fastmail-CLI Tester" <New+tag@Example.COM>"#),
+        ] {
             let before = server.received_requests().await.unwrap().len();
             let mut cmd = command(&server, home.path());
-            cmd.args(&args)
-                .args(["--from", "Fastmail-CLI Tester <New+tag@Example.COM>"]);
+            cmd.args(&args).args(["--from", from]);
             if draft {
                 cmd.arg("--draft");
             }

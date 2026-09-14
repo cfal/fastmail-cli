@@ -11,6 +11,8 @@
 - Keep the identity's saved name when `--from` is a bare address. Without
   `--from`, use the first non-wildcard identity; wildcard-only accounts require
   an explicit address to send.
+- Decode RFC-style quoted display names and escaped characters rather than
+  including the syntax quotes in the message's sender name.
 
 ## Sender Safety And Coverage
 
