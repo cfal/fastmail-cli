@@ -123,6 +123,185 @@ async fn bounded_output(command: &mut Command) -> std::process::Output {
     .unwrap()
 }
 
+async fn readable_email_server() -> MockServer {
+    use wiremock::matchers::body_string_contains;
+    let server = server().await;
+    let html = include_str!("fixtures/html-email.html").replace(
+        "https://pixel.example.test/track",
+        &format!("{}/must-not-fetch", server.uri()),
+    );
+    Mock::given(method("POST"))
+        .and(path("/cli/v1/jmap"))
+        .and(body_string_contains("Email/get"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap();
+            let call = &body["methodCalls"][0];
+            assert_eq!(call[0], "Email/get");
+            let list = if call[1]["ids"] == json!([]) {
+                json!([])
+            } else {
+                json!([{"id":"e1","threadId":"t1", "subject":"HTML message",
+                    "textBody":[{"partId":"html","type":"text/html"}],
+                    "htmlBody":[{"partId":"html","type":"text/html"}],
+                    "bodyValues":{"html":{"value":html,"isTruncated":true,"isEncodingProblem":true}}
+                }])
+            };
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/get", {"state":"s0","list":list}, call[2]
+            ]]}))
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn readable_bodies_reach_get_and_thread_without_changing_raw_records() {
+    let server = readable_email_server().await;
+    let home = tempfile::tempdir().unwrap();
+    for operation in ["get", "thread"] {
+        let mut raw = command(&server, home.path());
+        raw.args([operation, "e1", "--body-format", "raw"]);
+        let output = bounded_output(&mut raw).await;
+        assert!(output.status.success(), "{output:?}");
+        let baseline: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let original = if operation == "thread" {
+            &baseline["data"][0]
+        } else {
+            &baseline["data"]
+        };
+        assert!(original.get("readableBody").is_none());
+
+        for mode in [None, Some("auto"), Some("markdown"), Some("text")] {
+            let mut cmd = command(&server, home.path());
+            cmd.args([operation, "e1"]).env("RUST_LOG", "debug");
+            if let Some(mode) = mode {
+                cmd.args(["--body-format", mode]);
+            }
+            let output = bounded_output(&mut cmd).await;
+            assert!(output.status.success(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("dom walk stage complete"));
+            let mut result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(result["success"], true);
+            let message = if operation == "thread" {
+                &mut result["data"][0]
+            } else {
+                &mut result["data"]
+            };
+            let body = message
+                .as_object_mut()
+                .unwrap()
+                .remove("readableBody")
+                .unwrap();
+            assert_eq!(&*message, original);
+            assert_eq!(
+                body["format"],
+                if mode == Some("text") {
+                    "text"
+                } else {
+                    "markdown"
+                }
+            );
+            assert!(
+                body["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Cancellation deadline: September 30")
+            );
+            assert!(!body["content"].as_str().unwrap().contains("must-not-fetch"));
+            assert_eq!(
+                body["sourceParts"],
+                json!([{"partId":"html","type":"text/html"}])
+            );
+            assert_eq!(body["isTruncated"], true);
+            assert_eq!(body["isEncodingProblem"], true);
+            assert!(body["warnings"].as_array().unwrap().len() >= 3);
+        }
+    }
+    for req in server.received_requests().await.unwrap() {
+        assert!(matches!(req.url.path(), "/cli/v1/session" | "/cli/v1/jmap"));
+        if req.method == wiremock::http::Method::POST {
+            let body: Value = serde_json::from_slice(&req.body).unwrap();
+            for call in body["methodCalls"].as_array().unwrap() {
+                assert!(matches!(call[0].as_str(), Some("Email/get" | "Thread/get")));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn readable_watch_is_flushed_ndjson_only_for_full_arrivals() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use wiremock::matchers::body_string_contains;
+    let home = tempfile::tempdir().unwrap();
+    for (extra, expected) in [
+        (vec![], None),
+        (vec!["--full"], Some("markdown")),
+        (vec!["--full", "--body-format", "text"], Some("text")),
+        (vec!["--full", "--body-format", "raw"], None),
+    ] {
+        let server = readable_email_server().await;
+        Mock::given(body_string_contains("Email/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/changes", {"newState":"s1","hasMoreChanges":false,"created":["e1"],"updated":[],"destroyed":[]}, "c0"
+            ]]}))).with_priority(1).mount(&server).await;
+        let mut child = command(&server, home.path())
+            .args(["watch", "--poll", "1"])
+            .args(&extra)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let line =
+            tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line()).await;
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        let line = line
+            .expect("watch did not flush an arrival")
+            .unwrap()
+            .unwrap();
+        let result: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["data"]["id"], "e1");
+        assert_eq!(result["data"]["readableBody"]["format"].as_str(), expected);
+        if expected.is_some() {
+            assert!(
+                result["data"]["readableBody"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Cancellation deadline")
+            );
+        } else {
+            assert!(result["data"].get("readableBody").is_none());
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.url.path() != "/must-not-fetch")
+        );
+    }
+}
+
+#[tokio::test]
+async fn readable_body_options_are_validated_before_network_access() {
+    let server = server().await;
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["get", "e1", "--body-format", "yaml"],
+        vec!["watch", "--body-format", "text"],
+    ] {
+        let output = bounded_output(command(&server, home.path()).args(args)).await;
+        assert!(!output.status.success());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn domain_sender_and_name_reach_send_reply_forward_and_drafts() {
     let server = server_with_identities(json!([

@@ -1,3 +1,4 @@
+use super::body::{EmailBodyFormat, EmailReading};
 use crate::jmap::{ArrivalWatcher, authenticated_client};
 use crate::models::Output;
 use std::time::Duration;
@@ -14,6 +15,14 @@ pub struct WatchOptions {
 /// Stream newly arrived emails as newline-delimited JSON, one object per line,
 /// until interrupted.
 pub async fn watch(opts: WatchOptions) -> anyhow::Result<()> {
+    watch_with_body_format(opts, EmailBodyFormat::Auto).await
+}
+
+/// Stream arrivals with a derived reading view when `opts.full` is set.
+pub async fn watch_with_body_format(
+    opts: WatchOptions,
+    format: EmailBodyFormat,
+) -> anyhow::Result<()> {
     let client = std::sync::Arc::new(tokio::sync::Mutex::new(authenticated_client().await?));
 
     let mut watcher = ArrivalWatcher::new(
@@ -35,7 +44,12 @@ pub async fn watch(opts: WatchOptions) -> anyhow::Result<()> {
         }
 
         for email in &arrivals.emails {
-            Output::success(email).print_compact();
+            let format = if opts.full {
+                format
+            } else {
+                EmailBodyFormat::Raw
+            };
+            Output::success(EmailReading::new(email, format)).print_compact();
         }
     }
 }

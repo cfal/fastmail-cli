@@ -77,6 +77,10 @@ enum Commands {
     Get {
         /// Email ID
         email_id: String,
+
+        /// Derived reading view; raw JMAP fields are always retained
+        #[arg(long, value_enum, default_value = "auto")]
+        body_format: commands::EmailBodyFormat,
     },
 
     /// Stream newly arrived emails as newline-delimited JSON, until interrupted
@@ -89,6 +93,10 @@ enum Commands {
         #[arg(long)]
         full: bool,
 
+        /// Derived reading view for full arrivals; raw JMAP fields are retained
+        #[arg(long, value_enum, default_value = "auto", requires = "full")]
+        body_format: commands::EmailBodyFormat,
+
         /// Check every N seconds (at least 1) instead of holding a push connection open
         #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
         poll: Option<u64>,
@@ -98,6 +106,10 @@ enum Commands {
     Thread {
         /// Email ID (will fetch entire thread this email belongs to)
         email_id: String,
+
+        /// Derived reading view; raw JMAP fields are always retained
+        #[arg(long, value_enum, default_value = "auto")]
+        body_format: commands::EmailBodyFormat,
     },
 
     /// Search emails with JMAP filters
@@ -548,6 +560,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -599,20 +612,30 @@ async fn run_command(command: Commands) -> anyhow::Result<()> {
             ListCommands::Identities => commands::list_identities().await,
         },
 
-        Commands::Get { email_id } => commands::get_email(&email_id).await,
+        Commands::Get {
+            email_id,
+            body_format,
+        } => commands::get_email_with_body_format(&email_id, body_format).await,
 
-        Commands::Thread { email_id } => commands::get_thread(&email_id).await,
+        Commands::Thread {
+            email_id,
+            body_format,
+        } => commands::get_thread_with_body_format(&email_id, body_format).await,
 
         Commands::Watch {
             mailbox,
             full,
+            body_format,
             poll,
         } => {
-            commands::watch(commands::WatchOptions {
-                mailbox,
-                full,
-                poll,
-            })
+            commands::watch_with_body_format(
+                commands::WatchOptions {
+                    mailbox,
+                    full,
+                    poll,
+                },
+                body_format,
+            )
             .await
         }
 

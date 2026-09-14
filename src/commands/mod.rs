@@ -1,4 +1,5 @@
 mod auth;
+mod body;
 mod contacts;
 mod download;
 mod forward;
@@ -15,6 +16,7 @@ mod thread;
 mod watch;
 
 pub use auth::*;
+pub use body::EmailBodyFormat;
 pub use contacts::*;
 pub use download::*;
 pub use forward::*;
