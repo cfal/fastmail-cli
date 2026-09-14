@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Authentication required. Run `fastmail auth <token>` first.")]
+    #[error("Authentication required. Run `fastmail auth` first.")]
     NotAuthenticated,
 
     /// Authentication was rejected by the server.

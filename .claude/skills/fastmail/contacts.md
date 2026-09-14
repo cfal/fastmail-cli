@@ -37,7 +37,7 @@ fastmail contacts search "ACME Corp"
 
 fastmail contacts create --name "Alice Example" --email alice@example.com
 fastmail contacts update CONTACT_ID --title "Engineer"
-fastmail contacts delete CONTACT_ID
+fastmail contacts delete CONTACT_ID -y
 ```
 
 ## Typical Patterns
@@ -60,6 +60,9 @@ fastmail contacts search "bigcorp.com"
 - Create/update accept `--name`, `--email`, `--phone`, `--organization`, `--title`
   and `--notes`. Only create requires a name. Email and phone flags replace the
   corresponding lists; omitted fields and unsupported vCard properties are preserved.
+  Group companion properties (such as custom labels) are preserved too, so a
+  replaced grouped email/phone can leave a label without its former member.
 - Updates/deletes use ETags. On a concurrent-edit conflict, fetch and review the
-  contact again before retrying. `delete -y` skips the interactive confirmation.
+  contact again before retrying. `delete -y` is required; without `-y` the command
+  exits without deleting, rather than prompting interactively.
 - In `--server` mode, CardDAV credentials belong on the server, not the CLI client.

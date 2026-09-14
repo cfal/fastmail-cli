@@ -14,7 +14,7 @@ fastmail masked list
 fastmail masked create [--domain URL] [--description STR] [--prefix STR]
 fastmail masked enable ID
 fastmail masked disable ID
-fastmail masked delete ID [-y]
+fastmail masked delete ID -y
 ```
 
 ## Create a Masked Email
@@ -47,8 +47,7 @@ fastmail masked disable MASKED_ID
 fastmail masked enable MASKED_ID
 
 # Permanently delete
-fastmail masked delete MASKED_ID
-fastmail masked delete MASKED_ID -y   # skip confirmation
+fastmail masked delete MASKED_ID -y   # required; without -y, exits without deleting
 ```
 
 ## Typical Patterns

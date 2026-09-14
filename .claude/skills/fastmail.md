@@ -107,7 +107,7 @@ fastmail masked list
 fastmail masked create [--domain URL] [--description STR] [--prefix STR]
 fastmail masked enable ID
 fastmail masked disable ID
-fastmail masked delete ID [-y]
+fastmail masked delete ID -y
 ```
 
 ### Contacts
@@ -117,7 +117,7 @@ fastmail contacts list
 fastmail contacts search QUERY    # name, email, or org
 fastmail contacts create --name NAME [--email ADDRS] [--phone NUMBERS] [--organization ORG] [--title TITLE] [--notes TEXT]
 fastmail contacts update ID [--name NAME] [--email ADDRS] [--phone NUMBERS] [--organization ORG] [--title TITLE] [--notes TEXT]
-fastmail contacts delete ID [-y]
+fastmail contacts delete ID -y
 ```
 
 ### Other
