@@ -21,8 +21,8 @@ pub async fn download_attachment(
 
     let email = client.get_email(email_id).await?;
 
-    let attachments = email.attachments.as_ref();
-    if attachments.is_none() || attachments.unwrap().is_empty() {
+    let attachments = email.attachments.as_deref().unwrap_or_default();
+    if attachments.is_empty() {
         Output::<()>::error("No attachments found").print();
         return Ok(());
     }
@@ -31,10 +31,9 @@ pub async fn download_attachment(
     if format == Some("json") {
         let mut results: Vec<AttachmentContent> = Vec::new();
 
-        for attachment in attachments.unwrap() {
-            let blob_id = match &attachment.blob_id {
-                Some(id) => id,
-                None => continue,
+        for attachment in attachments {
+            let Some(blob_id) = &attachment.blob_id else {
+                continue;
             };
 
             let fallback = format!("{}.bin", blob_id);
@@ -63,10 +62,9 @@ pub async fn download_attachment(
     let mut downloaded: Vec<String> = Vec::new();
     let mut skipped = Vec::new();
 
-    for attachment in attachments.unwrap() {
-        let blob_id = match &attachment.blob_id {
-            Some(id) => id,
-            None => continue,
+    for attachment in attachments {
+        let Some(blob_id) = &attachment.blob_id else {
+            continue;
         };
 
         let fallback = format!("{}.bin", blob_id);
@@ -80,47 +78,18 @@ pub async fn download_attachment(
 
         let bytes = client.download_blob(blob_id).await?;
 
-        // Resize images if --max-size specified
-        let (final_bytes, final_filename) = if let Some(max) = max_bytes {
-            let mime = if is_image(content_type, &filename) {
-                infer_image_mime(&filename).unwrap_or(content_type)
-            } else {
-                content_type
-            };
-
-            if is_image(mime, &filename) {
-                match resize_image(&bytes, mime, max) {
-                    Ok((resized, new_mime)) => {
-                        // Update extension if format changed (e.g., PNG -> JPEG)
-                        let new_filename = if new_mime == "image/jpeg"
-                            && !filename.to_lowercase().ends_with(".jpg")
-                            && !filename.to_lowercase().ends_with(".jpeg")
-                        {
-                            let stem = Path::new(&filename)
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or(&filename);
-                            format!("{}.jpg", stem)
-                        } else {
-                            filename.clone()
-                        };
-                        (resized, new_filename)
-                    }
-                    Err(message) => {
-                        eprintln!("Skipping {filename}: {message}");
-                        skipped.push(DownloadFailure {
-                            filename,
-                            error: message,
-                        });
-                        continue;
-                    }
+        let (final_bytes, final_filename) =
+            match prepare_download(bytes, &filename, content_type, max_bytes) {
+                Ok(prepared) => prepared,
+                Err(message) => {
+                    eprintln!("Skipping {filename}: {message}");
+                    skipped.push(DownloadFailure {
+                        filename,
+                        error: message,
+                    });
+                    continue;
                 }
-            } else {
-                (bytes, filename.clone())
-            }
-        } else {
-            (bytes, filename.clone())
-        };
+            };
 
         let (mut file, path) = create_attachment_file(Path::new(out_dir), &final_filename)?;
         file.write_all(&final_bytes)?;
@@ -153,6 +122,37 @@ pub async fn download_attachment(
 struct DownloadFailure {
     filename: String,
     error: String,
+}
+
+fn prepare_download(
+    bytes: Vec<u8>,
+    filename: &str,
+    content_type: &str,
+    max_bytes: Option<usize>,
+) -> Result<(Vec<u8>, String), String> {
+    let Some(max_bytes) = max_bytes else {
+        return Ok((bytes, filename.to_owned()));
+    };
+    if !is_image(content_type, filename) {
+        return Ok((bytes, filename.to_owned()));
+    }
+
+    let mime = infer_image_mime(filename).unwrap_or(content_type);
+    let (bytes, new_mime) = resize_image(&bytes, mime, max_bytes)?;
+    let lowercase_name = filename.to_lowercase();
+    let filename = if new_mime == "image/jpeg"
+        && !lowercase_name.ends_with(".jpg")
+        && !lowercase_name.ends_with(".jpeg")
+    {
+        let stem = Path::new(filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(filename);
+        format!("{stem}.jpg")
+    } else {
+        filename.to_owned()
+    };
+    Ok((bytes, filename))
 }
 
 fn create_attachment_file(dir: &Path, filename: &str) -> std::io::Result<(std::fs::File, PathBuf)> {
@@ -196,6 +196,23 @@ struct AttachmentContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_preparation_preserves_passthrough_bytes_and_filename_rules() {
+        for (name, content_type, limit, expected_name) in [
+            ("large.png", "image/png", None, "large.png"),
+            ("notes.txt", "text/plain", Some(1), "notes.txt"),
+            ("small.tiff", "image/tiff", Some(10), "small.tiff"),
+            ("small.JPEG", "image/jpeg", Some(10), "small.JPEG"),
+            ("small.bin", "image/jpeg", Some(10), "small.jpg"),
+            ("small.png", "image/jpeg", Some(10), "small.png"),
+        ] {
+            let (bytes, filename) =
+                prepare_download(b"data".to_vec(), name, content_type, limit).unwrap();
+            assert_eq!(bytes, b"data");
+            assert_eq!(filename, expected_name);
+        }
+    }
 
     #[test]
     fn colliding_filenames_get_distinct_files_without_overwriting() {

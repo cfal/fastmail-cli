@@ -26,34 +26,24 @@ pub async fn create_masked_email(
 }
 
 pub async fn enable_masked_email(id: &str) -> anyhow::Result<()> {
-    let client = authenticated_client().await?;
-
-    client
-        .update_masked_email(id, Some("enabled"), None, None)
-        .await?;
-
-    Output::<()>::success_msg(format!("Masked email {} enabled", id)).print();
-    Ok(())
+    set_masked_email_state(id, "enabled").await
 }
 
 pub async fn disable_masked_email(id: &str) -> anyhow::Result<()> {
-    let client = authenticated_client().await?;
-
-    client
-        .update_masked_email(id, Some("disabled"), None, None)
-        .await?;
-
-    Output::<()>::success_msg(format!("Masked email {} disabled", id)).print();
-    Ok(())
+    set_masked_email_state(id, "disabled").await
 }
 
 pub async fn delete_masked_email(id: &str) -> anyhow::Result<()> {
+    set_masked_email_state(id, "deleted").await
+}
+
+async fn set_masked_email_state(id: &str, state: &str) -> anyhow::Result<()> {
     let client = authenticated_client().await?;
 
     client
-        .update_masked_email(id, Some("deleted"), None, None)
+        .update_masked_email(id, Some(state), None, None)
         .await?;
 
-    Output::<()>::success_msg(format!("Masked email {} deleted", id)).print();
+    Output::<()>::success_msg(format!("Masked email {id} {state}")).print();
     Ok(())
 }

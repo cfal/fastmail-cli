@@ -246,6 +246,75 @@ async fn mail_and_contact_commands_use_http_without_local_credentials() {
 }
 
 #[tokio::test]
+async fn compose_file_errors_happen_before_network_access() {
+    let server = server().await;
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("missing.txt");
+    for args in [
+        vec![
+            "send",
+            "--to",
+            "to@example.com",
+            "--subject",
+            "Hi",
+            "--body",
+            "Body",
+        ],
+        vec!["reply", "e1", "--body", "Body"],
+        vec!["forward", "e1", "--to", "to@example.com"],
+    ] {
+        let output = command(&server, home.path())
+            .args(args)
+            .arg("--attachment")
+            .arg(&missing)
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["success"], false);
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn masked_state_commands_keep_their_messages_and_wire_states() {
+    let server = server().await;
+    let home = tempfile::tempdir().unwrap();
+    for (operation, state) in [
+        ("enable", "enabled"),
+        ("disable", "disabled"),
+        ("delete", "deleted"),
+    ] {
+        let mut cmd = command(&server, home.path());
+        cmd.args(["masked", operation, "mask1"]);
+        if operation == "delete" {
+            cmd.arg("-y");
+        }
+        let output = cmd.output().await.unwrap();
+        assert!(output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result,
+            json!({"success": true, "message": format!("Masked email mask1 {state}")})
+        );
+    }
+    let requests = server.received_requests().await.unwrap();
+    let states: Vec<Value> = requests
+        .iter()
+        .filter(|r| r.url.path() == "/cli/v1/jmap")
+        .map(|r| {
+            let body: Value = serde_json::from_slice(&r.body).unwrap();
+            body["methodCalls"][0][1]["update"]["mask1"]["state"].clone()
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec![json!("enabled"), json!("disabled"), json!("deleted")]
+    );
+}
+
+#[tokio::test]
 async fn watch_uses_http_event_stream_and_polling() {
     let home = tempfile::tempdir().unwrap();
     for args in [&["watch"][..], &["watch", "--poll", "1"][..]] {

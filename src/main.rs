@@ -574,14 +574,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 async fn run_command(command: Commands) -> anyhow::Result<()> {
     match command {
         Commands::Auth { token } => {
-            let resolved = match token {
-                Some(t) => Ok(t),
-                None => commands::read_token_from_stdin(),
+            let token = match token {
+                Some(token) => token,
+                None => commands::read_token_from_stdin()?,
             };
-            match resolved {
-                Ok(t) => commands::auth(&t).await,
-                Err(e) => Err(e),
-            }
+            commands::auth(&token).await
         }
 
         Commands::List(cmd) => match cmd {
@@ -661,19 +658,16 @@ async fn run_command(command: Commands) -> anyhow::Result<()> {
             html_file,
             attachments,
         } => {
-            async {
-                let params = build_compose_params(
-                    cc.as_deref(),
-                    bcc.as_deref(),
-                    from.as_deref(),
-                    draft,
-                    html_body,
-                    html_file,
-                    &attachments,
-                )?;
-                commands::send(&to, &subject, &body, reply_to.as_deref(), params).await
-            }
-            .await
+            let params = build_compose_params(
+                cc.as_deref(),
+                bcc.as_deref(),
+                from.as_deref(),
+                draft,
+                html_body,
+                html_file,
+                &attachments,
+            )?;
+            commands::send(&to, &subject, &body, reply_to.as_deref(), params).await
         }
 
         Commands::Move { email_id, to } => commands::move_email(&email_id, &to).await,
@@ -715,19 +709,16 @@ async fn run_command(command: Commands) -> anyhow::Result<()> {
             html_file,
             attachments,
         } => {
-            async {
-                let params = build_compose_params(
-                    cc.as_deref(),
-                    bcc.as_deref(),
-                    from.as_deref(),
-                    draft,
-                    html_body,
-                    html_file,
-                    &attachments,
-                )?;
-                commands::reply(&email_id, &body, all, params).await
-            }
-            .await
+            let params = build_compose_params(
+                cc.as_deref(),
+                bcc.as_deref(),
+                from.as_deref(),
+                draft,
+                html_body,
+                html_file,
+                &attachments,
+            )?;
+            commands::reply(&email_id, &body, all, params).await
         }
 
         Commands::Forward {
@@ -742,19 +733,16 @@ async fn run_command(command: Commands) -> anyhow::Result<()> {
             html_file,
             attachments,
         } => {
-            async {
-                let params = build_compose_params(
-                    cc.as_deref(),
-                    bcc.as_deref(),
-                    from.as_deref(),
-                    draft,
-                    html_body,
-                    html_file,
-                    &attachments,
-                )?;
-                commands::forward(&email_id, &to, &body, params).await
-            }
-            .await
+            let params = build_compose_params(
+                cc.as_deref(),
+                bcc.as_deref(),
+                from.as_deref(),
+                draft,
+                html_body,
+                html_file,
+                &attachments,
+            )?;
+            commands::forward(&email_id, &to, &body, params).await
         }
 
         Commands::Completions { shell } => {
