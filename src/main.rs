@@ -193,7 +193,7 @@ enum Commands {
         #[arg(long)]
         reply_to: Option<String>,
 
-        /// Send from a specific identity (email address). Use `list identities` to see available.
+        /// Sender address or `Name <address>`; supports domain identities from `list identities`.
         #[arg(long)]
         from: Option<String>,
 
@@ -283,7 +283,7 @@ enum Commands {
         #[arg(long)]
         bcc: Option<String>,
 
-        /// Send from a specific identity (email address). Use `list identities` to see available.
+        /// Sender address or `Name <address>`; supports domain identities from `list identities`.
         #[arg(long)]
         from: Option<String>,
 
@@ -325,7 +325,7 @@ enum Commands {
         #[arg(long)]
         bcc: Option<String>,
 
-        /// Send from a specific identity (email address). Use `list identities` to see available.
+        /// Sender address or `Name <address>`; supports domain identities from `list identities`.
         #[arg(long)]
         from: Option<String>,
 

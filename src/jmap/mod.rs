@@ -117,6 +117,7 @@ pub struct AttachmentData {
 pub struct ComposeParams<'a> {
     pub cc: Vec<EmailAddress>,
     pub bcc: Vec<EmailAddress>,
+    /// Sender address or `Name <address>`; exact and domain identities are supported.
     pub from: Option<&'a str>,
     pub draft: bool,
     pub html_body: Option<String>,
@@ -515,13 +516,44 @@ fn apply_url_template(tmpl: &str, vars: &[(&str, &str)]) -> String {
 }
 
 fn pick_identity(identities: Vec<Identity>, from: Option<&str>) -> Result<Identity> {
-    match from {
-        Some(email) => identities
+    let Some(from) = from else {
+        return identities
             .into_iter()
-            .find(|i| i.email.eq_ignore_ascii_case(email))
-            .ok_or_else(|| Error::IdentityNotFoundForEmail(email.to_string())),
-        None => identities.into_iter().next().ok_or(Error::IdentityNotFound),
+            .find(|identity| !identity.email.starts_with("*@"))
+            .ok_or(Error::IdentityNotFound);
+    };
+    let invalid =
+        || Error::Config("Invalid --from: use one concrete email address or Name <address>".into());
+    if from.chars().any(char::is_control) {
+        return Err(invalid());
     }
+    let address: email_address::EmailAddress = from.trim().parse().map_err(|_| invalid())?;
+    let name = address.display_part();
+    if matches!(address.local_part(), "*" | "\"*\"" | "\"\\*\"") || name.contains(['<', '>', '@']) {
+        return Err(invalid());
+    }
+    let email = address.email();
+    let exact = identities
+        .iter()
+        .position(|identity| identity.email.eq_ignore_ascii_case(&email));
+    let domain = identities.iter().position(|identity| {
+        identity
+            .email
+            .strip_prefix("*@")
+            .is_some_and(|domain| domain.eq_ignore_ascii_case(address.domain()))
+    });
+    let index = exact
+        .or(domain)
+        .ok_or_else(|| Error::IdentityNotFoundForEmail(email.clone()))?;
+    let mut identity = identities.into_iter().nth(index).unwrap();
+    if exact.is_none() {
+        // RFC 8621 section 6: keep the wildcard identity ID, but use a concrete From.
+        identity.email = email;
+    }
+    if !name.is_empty() {
+        identity.name = name.to_string();
+    }
+    Ok(identity)
 }
 
 /// Build reply To/CC lists from an original email, expanding reply-all if
@@ -1319,7 +1351,17 @@ impl JmapClient {
     /// identity resolution fails, so callers (notably the MCP preview path)
     /// can still produce a useful preview without erroring out.
     pub async fn resolve_my_email(&self, from: Option<&str>) -> Option<String> {
-        self.resolve_identity(from).await.ok().map(|i| i.email)
+        self.resolve_sender(from).await.map(|sender| sender.email)
+    }
+
+    pub(crate) async fn resolve_sender(&self, from: Option<&str>) -> Option<EmailAddress> {
+        self.resolve_identity(from)
+            .await
+            .ok()
+            .map(|identity| EmailAddress {
+                email: identity.email,
+                name: Some(identity.name),
+            })
     }
 
     async fn prepare_compose(&mut self, from: Option<&str>, draft: bool) -> Result<ComposeContext> {
@@ -1335,7 +1377,7 @@ impl JmapClient {
         };
         let identity = match self.resolve_identity(from).await {
             Ok(id) => Some(id),
-            Err(_) if draft => None,
+            Err(_) if draft && from.is_none() => None,
             Err(e) => return Err(e),
         };
         Ok(ComposeContext {

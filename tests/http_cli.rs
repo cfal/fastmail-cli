@@ -7,6 +7,10 @@ use wiremock::{
 };
 
 async fn server() -> MockServer {
+    server_with_identities(json!([{"id":"me","name":"Me","email":"server@example.com"}])).await
+}
+
+async fn server_with_identities(identities: Value) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("GET")).and(path("/cli/v1/session"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -15,7 +19,7 @@ async fn server() -> MockServer {
             "apiUrl":"http://127.0.0.1:9/must-not-follow", "downloadUrl":"http://127.0.0.1:9/", "uploadUrl":"http://127.0.0.1:9/", "eventSourceUrl":"http://127.0.0.1:9/"
         }))).mount(&server).await;
     Mock::given(method("POST")).and(path("/cli/v1/jmap"))
-        .respond_with(|req: &wiremock::Request| {
+        .respond_with(move |req: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&req.body).unwrap();
             let responses: Vec<_> = body["methodCalls"].as_array().unwrap().iter().map(|call| {
                 let value = match call[0].as_str().unwrap() {
@@ -25,7 +29,7 @@ async fn server() -> MockServer {
                         {"id":"drafts","name":"Drafts","role":"drafts"},
                         {"id":"junk","name":"Junk","role":"junk"}
                     ]}),
-                    "Identity/get" => json!({"list":[{"id":"me","name":"Me","email":"server@example.com"}]}),
+                    "Identity/get" => json!({"list":identities}),
                     "Email/query" => json!({"ids":["e1"],"queryState":"s1","position":0,"total":1}),
                     "Email/get" => json!({"state":"s1","list":[{"id":"e1","threadId":"t1","subject":"Remote message","from":[{"email":"sender@example.com"}],"textBody":[{"partId":"text","type":"text/plain"}],"bodyValues":{"text":{"value":"Message body"}},"attachments":[{"blobId":"blob1","name":"notes.txt","type":"text/plain","size":10}]}]}),
                     "Thread/get" => json!({"list":[{"id":"t1","emailIds":["e1"]}]}),
@@ -117,6 +121,200 @@ async fn bounded_output(command: &mut Command) -> std::process::Output {
     .await
     .expect("CLI timed out")
     .unwrap()
+}
+
+#[tokio::test]
+async fn domain_sender_and_name_reach_send_reply_forward_and_drafts() {
+    let server = server_with_identities(json!([
+        {"id":"domain","name":"Saved Name","email":"*@example.com"}
+    ]))
+    .await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::body_string_contains("Email/get"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/get", {"list":[{"id":"original", "threadId":"thread", "subject":"Original",
+                    "from":[{"email":"other@example.com"}],
+                    "to":[{"email":"new+tag@example.com"}],
+                    "cc":[{"email":"NEW+TAG@example.com"},{"email":"another@example.com"}]
+                }]}, "e0"
+            ]]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec![
+            "send",
+            "--to",
+            "other@example.com",
+            "--subject",
+            "Subject",
+            "--body",
+            "Body",
+        ],
+        vec!["reply", "original", "--all", "--body", "Body"],
+        vec![
+            "forward",
+            "original",
+            "--to",
+            "other@example.com",
+            "--body",
+            "Body",
+        ],
+    ] {
+        for draft in [false, true] {
+            let before = server.received_requests().await.unwrap().len();
+            let mut cmd = command(&server, home.path());
+            cmd.args(&args)
+                .args(["--from", "Fastmail-CLI Tester <New+tag@Example.COM>"]);
+            if draft {
+                cmd.arg("--draft");
+            }
+            let output = bounded_output(&mut cmd).await;
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(result["success"], true);
+            assert_eq!(
+                result["data"]["status"],
+                if draft { "draft" } else { "sent" }
+            );
+            let calls: Vec<Value> = server.received_requests().await.unwrap()[before..]
+                .iter()
+                .filter_map(|req| serde_json::from_slice::<Value>(&req.body).ok())
+                .flat_map(|body| body["methodCalls"].as_array().cloned().unwrap_or_default())
+                .collect();
+            let creates: Vec<_> = calls.iter().filter(|call| call[0] == "Email/set").collect();
+            assert_eq!(creates.len(), 1);
+            let email = &creates[0][1]["create"]["email"];
+            assert_eq!(
+                email["from"],
+                json!([{"email":"New+tag@Example.COM", "name":"Fastmail-CLI Tester"}])
+            );
+            assert_eq!(
+                email["to"],
+                json!([{"email":"other@example.com", "name":null}])
+            );
+            if args[0] == "reply" {
+                assert_eq!(
+                    email["cc"],
+                    json!([{"email":"another@example.com", "name":null}])
+                );
+            }
+            let submits: Vec<_> = calls
+                .iter()
+                .filter(|call| call[0] == "EmailSubmission/set")
+                .collect();
+            assert_eq!(submits.len(), usize::from(!draft));
+            if !draft {
+                assert_eq!(
+                    submits[0][1]["create"]["submission"]["identityId"],
+                    "domain"
+                );
+            }
+            assert!(!calls.iter().any(|call| call[0] == "Identity/set"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_explicit_senders_never_create_mail_even_for_drafts() {
+    let server = server_with_identities(json!([
+        {"id":"domain","name":"Saved Name","email":"*@example.com"}
+    ]))
+    .await;
+    let home = tempfile::tempdir().unwrap();
+    for from in [
+        "*@example.com",
+        "new@sub.example.com",
+        "new@notexample.com",
+        "New <new@example.com> trailing",
+    ] {
+        for draft in [false, true] {
+            let mut cmd = command(&server, home.path());
+            cmd.args([
+                "send",
+                "--to",
+                "other@example.com",
+                "--subject",
+                "Subject",
+                "--body",
+                "Body",
+                "--from",
+                from,
+            ]);
+            if draft {
+                cmd.arg("--draft");
+            }
+            let output = bounded_output(&mut cmd).await;
+            assert!(
+                !output.status.success(),
+                "{from:?}, draft={draft}: {output:?}"
+            );
+        }
+    }
+    for req in server.received_requests().await.unwrap() {
+        assert_ne!(req.url.path(), "/cli/v1/upload");
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        for call in body["methodCalls"].as_array().into_iter().flatten() {
+            assert!(!call[0].as_str().unwrap().ends_with("/set"), "{call}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn drafts_without_from_can_be_saved_when_identity_lookup_is_empty_or_fails() {
+    for lookup_fails in [false, true] {
+        let server = server_with_identities(json!([])).await;
+        if lookup_fails {
+            Mock::given(method("POST"))
+                .and(wiremock::matchers::body_string_contains("Identity/get"))
+                .respond_with(ResponseTemplate::new(503))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let home = tempfile::tempdir().unwrap();
+        for from in [None, Some("new@example.com")] {
+            let mut cmd = command(&server, home.path());
+            cmd.args([
+                "send",
+                "--draft",
+                "--to",
+                "other@example.com",
+                "--subject",
+                "Subject",
+                "--body",
+                "Body",
+            ]);
+            if let Some(from) = from {
+                cmd.args(["--from", from]);
+            }
+            let output = bounded_output(&mut cmd).await;
+            assert_eq!(output.status.success(), from.is_none(), "{output:?}");
+            if from.is_none() {
+                let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(result["success"], true);
+                assert_eq!(result["data"]["status"], "draft");
+            }
+        }
+        let mut creates = 0;
+        for req in server.received_requests().await.unwrap() {
+            let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            for call in body["methodCalls"].as_array().into_iter().flatten() {
+                assert_ne!(call[0], "EmailSubmission/set");
+                if call[0] == "Email/set" {
+                    creates += 1;
+                    let email = &call[1]["create"]["email"];
+                    assert!(email.get("from").is_none());
+                    assert_eq!(email["keywords"]["$draft"], true);
+                    assert_eq!(email["mailboxIds"], json!({"drafts":true}));
+                }
+            }
+        }
+        assert_eq!(creates, 1);
+    }
 }
 
 #[tokio::test]

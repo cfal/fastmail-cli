@@ -457,6 +457,127 @@ fn test_pick_identity_not_found() {
     assert!(err.contains("list identities"));
 }
 
+#[test]
+fn domain_identity_uses_concrete_sender_and_keeps_submission_id() {
+    for from in [
+        "new@example.com",
+        "New+tag@EXAMPLE.COM",
+        "star*tag@example.com",
+        r#""star*tag"@example.com"#,
+    ] {
+        let identity = pick_identity(
+            vec![test_identity("domain", "*@Example.com", "Domain Sender")],
+            Some(from),
+        )
+        .unwrap();
+        assert_eq!(identity.id, "domain");
+        assert_eq!(identity.email, from);
+        assert_eq!(identity.name, "Domain Sender");
+    }
+}
+
+#[test]
+fn exact_identity_takes_precedence_over_domain_identity() {
+    let identity = pick_identity(
+        vec![
+            test_identity("domain", "*@example.com", "Domain Sender"),
+            test_identity("exact", "Alice@Example.com", "Alice"),
+        ],
+        Some("alice@example.com"),
+    )
+    .unwrap();
+    assert_eq!(identity.id, "exact");
+    assert_eq!(identity.email, "Alice@Example.com");
+    assert_eq!(identity.name, "Alice");
+}
+
+#[test]
+fn sender_name_is_a_per_message_override() {
+    for identity_email in ["new@example.com", "*@example.com"] {
+        let saved = test_identity("id", identity_email, "Saved Name");
+        let identity = pick_identity(
+            vec![saved.clone()],
+            Some("Fastmail-CLI Tester <new@example.com>"),
+        )
+        .unwrap();
+        assert_eq!(identity.id, "id");
+        assert_eq!(identity.email, "new@example.com");
+        assert_eq!(identity.name, "Fastmail-CLI Tester");
+        assert_eq!(saved.name, "Saved Name");
+        assert_eq!(saved.email, identity_email);
+    }
+}
+
+#[test]
+fn domain_identity_rejects_other_domains_and_nonconcrete_senders() {
+    for from in [
+        "new@sub.example.com",
+        "new@notexample.com",
+        "new@example.com.evil.test",
+        "new@elsewhere.test",
+        "*@example.com",
+        "Name <*@example.com>",
+        r#""*"@example.com"#,
+        r#"Name <"*"@example.com>"#,
+        r#""\*"@example.com"#,
+        "@example.com",
+        "new@@example.com",
+        "new name@example.com",
+        "new@example.com,other@example.com",
+        "New <new@example.com>, Other <other@example.com>",
+        "new@example.com <other@example.com>",
+        "New <new@example.com> trailing",
+        "New <new@example.com",
+        "New\r\nBcc: other@example.com <new@example.com>",
+        ".new@example.com",
+        "new..name@example.com",
+        "",
+    ] {
+        let result = pick_identity(
+            vec![test_identity("domain", "*@example.com", "Domain Sender")],
+            Some(from),
+        );
+        assert!(result.is_err(), "Accepted {from:?}");
+    }
+}
+
+#[test]
+fn default_sender_skips_wildcard_identities() {
+    let wildcard = test_identity("domain", "*@example.com", "Domain Sender");
+    let identity = pick_identity(
+        vec![
+            wildcard.clone(),
+            test_identity("exact", "me@example.com", "Me"),
+        ],
+        None,
+    )
+    .unwrap();
+    assert_eq!(identity.id, "exact");
+    assert!(matches!(
+        pick_identity(vec![wildcard], None),
+        Err(Error::IdentityNotFound)
+    ));
+}
+
+#[test]
+fn invalid_sender_errors_identify_the_from_argument() {
+    for from in [
+        "@example.com",
+        "Name\r\n <new@example.com>",
+        r#""*"@example.com"#,
+    ] {
+        let error = pick_identity(
+            vec![test_identity("domain", "*@example.com", "Domain Sender")],
+            Some(from),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Config error: Invalid --from: use one concrete email address or Name <address>"
+        );
+    }
+}
+
 // ============ Body structure tests ============
 
 #[test]
