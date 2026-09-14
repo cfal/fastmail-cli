@@ -22,6 +22,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 - `src/remote.rs`: server URL validation, Basic credential decoding/redaction, and proxy error classification.
 - `src/mcp/graphql/tests/`: schema, connections, resolution and batching, attachments, mutations, sessions, and subscriptions. Shared JMAP fixtures remain in `src/mcp/graphql/tests.rs`.
 - Small pure helpers retain tests beside their implementations, including GraphQL input limits, filters, SDL slicing, image bounds, and model serialization.
+- `src/models/readable_body_tests.rs`: MIME-aware body selection, HTML conversion, image policy, source fidelity, failures, and limits, using synthetic email fixtures in `tests/fixtures/`.
 - `tests/config.rs`: real configuration getters and persistence in child processes with isolated homes and environment variables.
 - `tests/http_cli.rs`: executable-level output, exit status, remote transport, domain senders and names across compose operations, downloads, and destructive-command confirmation.
 - `src/main.rs`: Clap argument-definition consistency and literal help text.

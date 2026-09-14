@@ -20,32 +20,48 @@ results are chronologically ordered; sort explicitly by the appropriate date
 when the task requires it. An ID can stop resolving after deletion or an account
 change.
 
-## Body Values
+## Readable Bodies
 
-Use each `textBody[].partId` to look up its entry in `bodyValues`. Do not take the
-first map entry: it may be HTML or only one part of a multipart body.
+Full reads add `readableBody` beside the original JMAP fields. Prefer this view
+over building an HTML parser. The default `auto` mode preserves genuine plain
+text and converts HTML-only parts to Markdown. `format` names the actual output.
 
 ```bash
 set -o pipefail
-fastmail get EMAIL_ID | jq -er '
-  select(.success == true) | .data as $email
-  | [($email.textBody // [])[]
-     | select(.partId != null)
-     | $email.bodyValues[.partId].value // empty]
-  | join("\n")
-'
+fastmail get EMAIL_ID | jq -e 'select(.success == true) | .data.readableBody'
+fastmail get EMAIL_ID --body-format markdown
+fastmail thread EMAIL_ID --body-format text
+fastmail get EMAIL_ID --body-format raw
 ```
 
-If no text body exists, inspect `htmlBody` and its corresponding values rather
-than claiming the message is empty. Check `isTruncated` and `isEncodingProblem`
-on body values before treating them as complete, faithful text. Attachment
-metadata is not attachment content; see [Attachments](attachments.md).
+`markdown` prefers the HTML alternative for links, lists, tables, and quotes.
+`text` prefers plain text and renders any HTML parts as text. `raw` omits the
+derived field. None changes the original body values. Check `isTruncated`,
+`isEncodingProblem`, and `warnings` before calling a message complete. Conversion
+is best-effort, capped at 128 parts, 1 MiB input/output, and 64 HTML levels.
+Images are alt-text/placeholders, never loaded or OCR'd; no image alt text can
+prove what an image contains. Do not follow links just to render a message.
+
+`sourceParts` records the selected part IDs and MIME types. For original content,
+use each `textBody[]` or `htmlBody[]` part's `partId` to find its `bodyValues` entry.
+Do not take the first map entry or concatenate both alternative representations.
+JMAP's `textBody` can contain HTML: inspect each part's `type`. Check the raw
+values' own truncation and encoding flags too. If no readable field is present,
+check `fastmail --version`/`get --help` and the original body metadata rather than
+claiming the message is empty. Attachment metadata is not attachment content;
+see [Attachments](attachments.md).
+
+On GraphQL/MCP, select `readableBody { format content isTruncated
+isEncodingProblem warnings sourceParts { partId contentType } }` on an email.
+The optional `format` argument takes `AUTO` (default), `MARKDOWN`, or `TEXT`.
+The field shares the lazy body fetch and works on thread and subscription emails.
 
 ## Watch New Arrivals
 
 ```bash
 fastmail watch --mailbox INBOX
 fastmail watch --mailbox INBOX --full --poll 30
+fastmail watch --full --body-format markdown --poll 30
 ```
 
 Watch starts from the current state, not historical mail, and runs until

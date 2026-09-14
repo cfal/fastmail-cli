@@ -106,7 +106,7 @@ refusals, completions, and MCP transports have different output contracts.
 
 Check both the process exit status and `.success`. In particular, no-attachment
 downloads and partial image downloads can exit zero with `success: false`.
-Keep stderr separate; debug logging can also interfere with JSON parsing.
+Keep stderr separate from JSON stdout, including when debug logging is enabled.
 
 For Bash pipelines, use `pipefail` and reject unsuccessful envelopes before
 selecting data. This example preserves empty search results as an empty array:
@@ -120,3 +120,9 @@ fastmail search --subject "Invoice" --limit 10 |
 Email models use camelCase fields such as `receivedAt`, `textBody`, and `bodyValues`;
 command-specific results also use snake_case fields such as `email_id`. Follow the
 actual returned structure rather than assuming one naming convention everywhere.
+
+For full email reads, use `readableBody.content` and inspect its `format`,
+`isTruncated`, `isEncodingProblem`, and `warnings` instead of writing an HTML
+extractor. `--body-format markdown` prefers the richer HTML alternative. Raw
+`textBody` can itself contain HTML; see [Conversations](references/conversations.md)
+for original-body access, limits, and older CLI versions.

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Shared readable email bodies using `html-to-markdown-rs`, preserving JMAP
+  alternatives, source metadata, raw values, and fidelity warnings.
+- `readableBody` on full CLI reads and GraphQL/MCP email fields, with automatic,
+  Markdown, and plain-text selection plus CLI raw-only output. Conversion does
+  not fetch resources or execute scripts and bounds input, output, and depth.
+
 ## [4.0.3] - 2026-09-14
 
 ### Added

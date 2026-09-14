@@ -55,6 +55,23 @@ dedicated unprivileged account/container with OS resource limits for a shared
 service. Extraction disables disk caching and OCR and requests a 60-second
 cooperative timeout; this cannot forcibly terminate every parser.
 
+Readable message bodies use local HTML-to-Markdown/text conversion, not document
+ingestion or a browser. They never fetch linked resources, CID images, data-URL
+images, or stylesheets, and never execute scripts. Image source URLs are omitted
+from image output; alt text and placeholders remain. Original bodies are retained.
+This is not HTML sanitization or a prompt-injection defense. Treat converted
+content, link destinations, and raw messages as untrusted; downstream renderers
+must disable raw HTML and automatic resource loading.
+
+Each derived body processes at most 128 selected parts and 1 MiB of input, emits
+at most 1 MiB of content, and limits HTML traversal to 64 levels. Missing parts,
+conversion failures, encoding problems, and truncation are reported rather than
+silently presented as complete content. These are not limits on the retained raw
+message. GraphQL runs conversions off its async workers with at most two running
+at once per process. Output limits apply after conversion; parser allocations
+and CPU time are not hard-bounded by the output limit. Use OS resource limits
+for hostile mail, as for other document parsing.
+
 ## Dependency Dispositions
 
 The September 2026 review found no evidence of deliberately malicious code in

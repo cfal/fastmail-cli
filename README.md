@@ -192,6 +192,45 @@ fastmail list emails --mailbox Sent --limit 10
 fastmail get EMAIL_ID
 ```
 
+Full CLI reads (`get`, `thread`, and `watch --full`) add `readableBody` alongside
+the unchanged JMAP fields. Its `content` is ready to read, with an actual `format`
+of `text` or `markdown`, ordered `sourceParts` (`partId` and `type`),
+`isTruncated`, `isEncodingProblem`, and `warnings`.
+
+```bash
+# Default: prefer genuine plain text; convert HTML-only parts to Markdown
+fastmail get EMAIL_ID | jq '.data.readableBody'
+
+# Prefer the richer HTML alternative, converted to Markdown
+fastmail thread EMAIL_ID --body-format markdown
+
+# Plain-text rendering, or only the original JMAP fields without conversion
+fastmail get EMAIL_ID --body-format text
+fastmail get EMAIL_ID --body-format raw
+```
+
+`--body-format auto|markdown|text|raw` never changes `bodyValues`, `textBody`, or
+`htmlBody`. JMAP's `textBody` is a text-*preferred* part sequence, not a guarantee
+of plain text. Conversion checks each part's MIME type and keeps the selected
+sequence in order, without concatenating alternative representations. No
+`readableBody` is added when there are no body parts; list/search summaries stay
+unchanged. Reading does not mark mail read.
+
+HTML conversion uses [html-to-markdown-rs](https://github.com/xberg-io/html-to-markdown)
+locally. It preserves links, lists, tables, and quoted conversations without
+article extraction or quote trimming. Images become alt-text/placeholders;
+scripts, styles, comments, and obviously hidden elements are omitted. No remote,
+CID, or data-URL resource is loaded, and no scripts execute. Image-only content
+still needs separate inspection. Layout and visibility are best-effort, not a
+browser rendering or a security sanitizer; all content remains untrusted.
+
+The derived view processes at most 128 parts and 1 MiB of selected input, emits
+at most 1 MiB of content, and uses a 64-level HTML traversal limit. Oversized HTML
+parts are skipped rather than parsed partially. Check the flags and warnings
+before treating a view as complete; raw values remain available for missing,
+unsupported, or failed conversions. Limits do not change the upstream raw body
+fetch. `--body-format` on `watch` requires `--full`.
+
 ### Search
 
 Search uses JMAP filter flags (all filters are ANDed together):
@@ -504,7 +543,10 @@ fastmail list mailboxes | jq '.data[] | select(.role == "inbox") | .unreadEmails
 # List email subjects
 fastmail list emails | jq '.data.emails[].subject'
 
-# Inspect email body parts and their values
+# Read without hand-parsing HTML; retain fidelity warnings
+fastmail get EMAIL_ID | jq '.data.readableBody'
+
+# Inspect original email body parts and their values
 fastmail get EMAIL_ID | jq '.data | {textBody, htmlBody, bodyValues}'
 ```
 
@@ -761,7 +803,7 @@ email and downloads nothing at all:
     nodes {
       subject
       from { name email }
-      textBody
+      readableBody { format content isTruncated isEncodingProblem warnings }
       attachments {
         nodes { name contentType size cid text }
       }
@@ -777,13 +819,21 @@ email and downloads nothing at all:
     emails(first: 5) {
       nodes {
         subject
-        thread { total emails { nodes { subject textBody } } }
+        thread { total emails { nodes { subject readableBody { format content warnings } } } }
         mailboxes { name role }
       }
     }
   }
 }
 ```
+
+`Email.readableBody(format: AUTO)` is lazy and shares the same batched detail
+fetch as raw bodies and attachment metadata. `MARKDOWN` prefers the HTML
+alternative; `TEXT` renders plain text. `sourceParts { partId contentType }`
+identifies the selected parts. It is available on individual messages,
+connections, threads, and subscription arrivals, including through MCP's
+`graphql` tool. `textBody` and `htmlBody` remain raw joined JMAP values, not
+converted reading views.
 
 ### Composable filters
 
