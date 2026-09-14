@@ -6,8 +6,9 @@
 
 ### Fixed
 
-- Bound GraphQL document size and input nesting before parsing. Apply the HTTP
-  JSON body limit to MCP requests, including streamed bodies.
+- Bound GraphQL document size and input nesting before parsing, and fragment
+  expansion before recursive validation. Apply the HTTP JSON body limit to MCP
+  requests, including streamed bodies.
 - Preserve untouched vCard properties during contact updates. Protect updates
   and deletes with ETags, and give UID-less contacts stable resource IDs.
 - Keep watcher cursors until detail reconciliation succeeds, recover from

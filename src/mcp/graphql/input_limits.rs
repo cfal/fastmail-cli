@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use async_graphql::{
-    ServerError, ServerResult, Variables,
-    extensions::{Extension, ExtensionContext, ExtensionFactory, NextParseQuery},
-    parser::types::ExecutableDocument,
+    Request, ServerError, ServerResult,
+    extensions::{Extension, ExtensionContext, ExtensionFactory, NextPrepareRequest},
+    parser::types::{ExecutableDocument, Selection},
 };
 
 const MAX_QUERY_BYTES: usize = 64 * 1024;
 const MAX_SYNTAX_DEPTH: usize = 32;
+const MAX_EXPANDED_SELECTIONS: usize = 10_000;
 
 pub(crate) fn check_query(query: &str) -> Result<(), String> {
     if query.len() > MAX_QUERY_BYTES {
@@ -67,6 +68,56 @@ pub(crate) fn check_query(query: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn check_expansion(
+    document: &ExecutableDocument,
+    limit: usize,
+    max_depth: usize,
+) -> ServerResult<()> {
+    // The upstream recursive-depth check expands fragments before complexity
+    // validation. Include unused definitions, which later validators also visit.
+    let roots = document
+        .operations
+        .iter()
+        .map(|(_, op)| &op.node.selection_set)
+        .chain(document.fragments.values().map(|f| &f.node.selection_set));
+    let mut remaining = limit;
+    for root in roots {
+        let mut pending = vec![(root, 0)];
+        while let Some((selections, depth)) = pending.pop() {
+            if depth > max_depth {
+                return Err(ServerError::new(
+                    format!("Expanded GraphQL nesting exceeds {max_depth} levels"),
+                    Some(selections.pos),
+                ));
+            }
+            remaining = remaining
+                .checked_sub(selections.node.items.len())
+                .ok_or_else(|| {
+                    ServerError::new(
+                        format!("GraphQL expansion exceeds {limit} selections"),
+                        Some(selections.pos),
+                    )
+                })?;
+            for selection in &selections.node.items {
+                let children = match &selection.node {
+                    Selection::Field(field) => Some(&field.node.selection_set),
+                    Selection::InlineFragment(fragment) => Some(&fragment.node.selection_set),
+                    Selection::FragmentSpread(spread) => document
+                        .fragments
+                        .get(&spread.node.fragment_name.node)
+                        .map(|fragment| &fragment.node.selection_set),
+                };
+                if let Some(children) = children
+                    && !children.node.items.is_empty()
+                {
+                    pending.push((children, depth + 1));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct InputLimits;
 
 impl ExtensionFactory for InputLimits {
@@ -77,15 +128,19 @@ impl ExtensionFactory for InputLimits {
 
 #[async_graphql::async_trait::async_trait]
 impl Extension for InputLimits {
-    async fn parse_query(
+    async fn prepare_request(
         &self,
         ctx: &ExtensionContext<'_>,
-        query: &str,
-        variables: &Variables,
-        next: NextParseQuery<'_>,
-    ) -> ServerResult<ExecutableDocument> {
-        check_query(query).map_err(|message| ServerError::new(message, None))?;
-        next.run(ctx, query, variables).await
+        mut request: Request,
+        next: NextPrepareRequest<'_>,
+    ) -> ServerResult<Request> {
+        check_query(&request.query).map_err(|message| ServerError::new(message, None))?;
+        check_expansion(
+            request.parsed_query()?,
+            MAX_EXPANDED_SELECTIONS,
+            MAX_SYNTAX_DEPTH,
+        )?;
+        next.run(ctx, request).await
     }
 }
 
@@ -119,5 +174,29 @@ mod tests {
     async fn schema_uses_the_same_preparse_guard() {
         let response = super::super::build_schema().execute("[".repeat(33)).await;
         assert!(response.errors[0].message.contains("syntax nesting"));
+    }
+
+    #[test]
+    fn fragment_expansion_is_bounded_before_recursive_validation() {
+        let document = async_graphql::parser::parse_query(
+            "{ ...Twice } fragment Twice on QueryRoot { ...Leaf ...Leaf } \
+             fragment Leaf on QueryRoot { __typename }",
+        )
+        .unwrap();
+        assert!(check_expansion(&document, 10, 3).is_ok());
+        assert!(check_expansion(&document, 9, 3).is_err());
+        assert!(check_expansion(&document, 10, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn unused_fragment_cycles_are_checked_before_validation() {
+        let response = super::super::build_schema()
+            .execute("{ __typename } fragment Unused on QueryRoot { ...Unused }")
+            .await;
+        assert!(
+            response.errors[0]
+                .message
+                .contains("Expanded GraphQL nesting")
+        );
     }
 }

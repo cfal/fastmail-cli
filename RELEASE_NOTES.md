@@ -6,7 +6,8 @@ reviews. No deliberately malicious code was identified in the reviewed scope.
 ## Security
 
 - Bound GraphQL query size and syntax nesting before parsing, including input
-  values. Apply the 2 MiB JSON limit to streamed MCP request bodies.
+  values, and cap fragment expansion before recursive validation. Apply the
+  2 MiB JSON limit to streamed MCP request bodies.
 - Require an expiring, one-shot `confirmationToken` from spam PREVIEW before
   CONFIRM. Tokens are bound to the account, email and operation.
 - Stop subscription record caches from accumulating mail indefinitely. Enforce
