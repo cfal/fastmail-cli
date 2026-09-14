@@ -42,7 +42,8 @@ is best-effort, capped at 128 parts, 1 MiB input/output, and 64 HTML levels.
 Images are alt-text/placeholders, never loaded or OCR'd; no image alt text can
 prove what an image contains. Do not follow links just to render a message.
 
-`sourceParts` records the selected part IDs and MIME types. For original content,
+`sourceParts` records part IDs and MIME types considered up to the reading limits.
+When `isTruncated` is true, later parts may be unlisted. For original content,
 use each `textBody[]` or `htmlBody[]` part's `partId` to find its `bodyValues` entry.
 Do not take the first map entry or concatenate both alternative representations.
 JMAP's `textBody` can contain HTML: inspect each part's `type`. Check the raw

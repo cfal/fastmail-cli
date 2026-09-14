@@ -31,7 +31,8 @@ pub enum ReadableBodyFormat {
     Markdown,
 }
 
-/// A selected JMAP body part. Its unchanged value is available in `bodyValues`.
+/// A JMAP body part considered before the reading limits were reached.
+/// Its unchanged value is available in `bodyValues`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadableBodySource {
@@ -59,7 +60,7 @@ impl ReadableBody {
         }
     }
 
-    fn append(&mut self, content: &str) {
+    fn append(&mut self, content: &str) -> bool {
         if !self.content.is_empty() && !content.is_empty() {
             let remaining = MAX_OUTPUT_BYTES - self.content.len();
             self.content.push_str(&"\n\n"[..remaining.min(2)]);
@@ -73,6 +74,7 @@ impl ReadableBody {
                 "Readable body reached the 1 MiB output limit; inspect the original body values.",
             );
         }
+        prefix.len() < content.len() || self.content.len() == MAX_OUTPUT_BYTES
     }
 }
 
@@ -129,39 +131,40 @@ impl Email {
                     body.warn("JMAP reported an encoding problem in a selected body value.");
                 }
             }
-            if !is_type(part, "text/plain") && !is_type(part, "text/html") {
+            let (output_limited, input_limited) = if !is_type(part, "text/plain")
+                && !is_type(part, "text/html")
+            {
                 body.warn("A non-text or untyped body part was omitted; inspect its original metadata or attachment.");
-                body.append("[Non-text body part omitted]");
-                continue;
-            }
-            let Some(value) = value else {
-                body.warn("A selected body value is unavailable; this reading view is incomplete.");
-                body.append("[Body part unavailable]");
-                continue;
-            };
-            if value.value.len() > remaining_input {
-                body.is_truncated = true;
-                body.warn("Readable body reached the 1 MiB input limit; inspect the original body values.");
-                // Do not parse half an HTML attribute or invent a closing-tag structure.
-                if is_type(part, "text/html") {
-                    body.append("[HTML body part exceeds the conversion limit]");
-                    break;
+                (body.append("[Non-text body part omitted]"), false)
+            } else if let Some(value) = value {
+                if value.value.len() > remaining_input {
+                    body.is_truncated = true;
+                    body.warn("Readable body reached the 1 MiB input limit; inspect the original body values.");
+                    // Do not parse half an HTML attribute or invent a closing-tag structure.
+                    if is_type(part, "text/html") {
+                        body.append("[HTML body part exceeds the conversion limit]");
+                        break;
+                    }
                 }
-            }
-            let input = utf8_prefix(&value.value, remaining_input);
-            remaining_input -= input.len();
-            if is_type(part, "text/html") {
-                convert_html(input, &mut body);
-            } else if format == ReadableBodyFormat::Markdown {
-                body.append(&literal_markdown(input));
+                let input = utf8_prefix(&value.value, remaining_input);
+                remaining_input -= input.len();
+                let output_limited = if is_type(part, "text/html") {
+                    convert_html(input, &mut body)
+                } else if format == ReadableBodyFormat::Markdown {
+                    body.append(&literal_markdown(input))
+                } else {
+                    body.append(input)
+                };
+                (output_limited, input.len() < value.value.len())
             } else {
-                body.append(input);
-            }
-            if body.content.len() == MAX_OUTPUT_BYTES && index + 1 < parts.len() {
+                body.warn("A selected body value is unavailable; this reading view is incomplete.");
+                (body.append("[Body part unavailable]"), false)
+            };
+            if output_limited && index + 1 < parts.len() {
                 body.is_truncated = true;
                 body.warn("Readable body reached the 1 MiB output limit; inspect the original body values.");
             }
-            if input.len() < value.value.len() || body.content.len() == MAX_OUTPUT_BYTES {
+            if input_limited || output_limited {
                 break;
             }
         }
@@ -264,7 +267,7 @@ impl HtmlVisitor for EmailHtmlVisitor {
     }
 }
 
-fn convert_html(input: &str, body: &mut ReadableBody) {
+fn convert_html(input: &str, body: &mut ReadableBody) -> bool {
     let visitor = Arc::new(Mutex::new(EmailHtmlVisitor {
         markdown: body.format == ReadableBodyFormat::Markdown,
         ..Default::default()
@@ -292,7 +295,7 @@ fn convert_html(input: &str, body: &mut ReadableBody) {
         visitor: Some(visitor.clone()),
         ..Default::default()
     };
-    match convert(input, options) {
+    let mut content = match convert(input, options) {
         Ok(result) => {
             for warning in result.warnings {
                 use html_to_markdown_rs::types::WarningKind;
@@ -308,23 +311,18 @@ fn convert_html(input: &str, body: &mut ReadableBody) {
                     _ => body.warn("The HTML converter reported a best-effort conversion warning; inspect the original body values."),
                 }
             }
-            body.append(
-                result
-                    .content
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim_matches('\n'),
-            );
+            result.content.unwrap_or_default()
         }
         Err(_) => {
             body.warn("HTML conversion failed; inspect the original body values.");
-            body.append("[HTML conversion unavailable]");
+            "[HTML conversion unavailable]".to_owned()
         }
-    }
+    };
     let visitor = visitor.lock().unwrap();
     if !visitor.markdown && visitor.omitted_graphics {
         // The converter's plain walker skips SVG/MathML before invoking visitors.
-        body.append("[Embedded media omitted]");
+        content.truncate(content.trim_end_matches('\n').len());
+        content.push_str("\n\n[Embedded media omitted]");
     }
     if visitor.omitted_images {
         body.warn(
@@ -336,4 +334,5 @@ fn convert_html(input: &str, body: &mut ReadableBody) {
             "Embedded media was not loaded; inspect the original body or attachments when needed.",
         );
     }
+    body.append(content.trim_matches('\n'))
 }

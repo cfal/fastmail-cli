@@ -399,3 +399,37 @@ fn readable_body_limits_apply_across_parts_and_report_unrendered_suffixes() {
     assert!(body.is_truncated);
     assert!(body.warnings.iter().any(|w| w.contains("output limit")));
 }
+
+#[test]
+fn readable_body_stops_at_a_utf8_output_boundary() {
+    const LIMIT: usize = 1024 * 1024;
+    for (mime, content) in [
+        ("text/plain", format!("{}\u{20ac}", "a".repeat(LIMIT - 9))),
+        (
+            "text/html",
+            format!("<p>{}a\u{20ac}</p>", "*".repeat((LIMIT - 2) / 2)),
+        ),
+    ] {
+        let mut message = email(mime, &content);
+        message.text_body.as_mut().unwrap().push(
+            serde_json::from_value(json!({
+                "partId":"2", "type":"text/plain"
+            }))
+            .unwrap(),
+        );
+        message.body_values.as_mut().unwrap().insert(
+            "2".to_owned(),
+            serde_json::from_value(json!({"value":"tail"})).unwrap(),
+        );
+        let body = message.readable_body(BodyPreference::Markdown).unwrap();
+        assert!(body.is_truncated);
+        assert!(body.warnings.iter().any(|w| w.contains("output limit")));
+        assert_eq!(
+            body.source_parts.len(),
+            1,
+            "must stop after truncated {mime}"
+        );
+        assert_eq!(body.content.len(), LIMIT - 1);
+        assert!(body.content.ends_with('a'));
+    }
+}

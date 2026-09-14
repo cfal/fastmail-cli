@@ -84,7 +84,8 @@ impl ReadableBody {
         &self.content
     }
 
-    /// Selected JMAP body parts, in order. Alternative representations are not concatenated.
+    /// JMAP body parts considered up to the reading limits, in order.
+    /// When isTruncated is true, later parts may be unlisted. Alternatives are not concatenated.
     async fn source_parts(&self) -> &[ReadableBodySource] {
         &self.source_parts
     }

@@ -194,8 +194,9 @@ fastmail get EMAIL_ID
 
 Full CLI reads (`get`, `thread`, and `watch --full`) add `readableBody` alongside
 the unchanged JMAP fields. Its `content` is ready to read, with an actual `format`
-of `text` or `markdown`, ordered `sourceParts` (`partId` and `type`),
-`isTruncated`, `isEncodingProblem`, and `warnings`.
+of `text` or `markdown`, ordered `sourceParts` (`partId` and `type`) considered
+up to the reading limits, `isTruncated`, `isEncodingProblem`, and `warnings`.
+When `isTruncated` is true, later parts may be absent from `sourceParts`.
 
 ```bash
 # Default: prefer genuine plain text; convert HTML-only parts to Markdown
@@ -833,7 +834,7 @@ email and downloads nothing at all:
 `Email.readableBody(format: AUTO)` is lazy and shares the same batched detail
 fetch as raw bodies and attachment metadata. `MARKDOWN` prefers the HTML
 alternative; `TEXT` renders plain text. `sourceParts { partId contentType }`
-identifies the selected parts. It is available on individual messages,
+identifies parts considered up to the reading limits. The field is available on individual messages,
 connections, threads, and subscription arrivals, including through MCP's
 `graphql` tool. `textBody` and `htmlBody` remain raw joined JMAP values, not
 converted reading views.
