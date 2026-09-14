@@ -90,14 +90,13 @@ pub struct JmapClient {
 
 /// Create an authenticated JMAP client from config
 pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
-    if let Some(server) = crate::remote::HttpServer::current() {
-        let mut client = JmapClient::try_via_server(server)?;
-        client.authenticate().await?;
-        return Ok(client);
-    }
-    let config = crate::config::Config::load()?;
-    let token = config.get_token()?;
-    let mut client = JmapClient::try_new(token)?;
+    let mut client = match crate::remote::HttpServer::current() {
+        Some(server) => JmapClient::try_via_server(server)?,
+        None => {
+            let config = crate::config::Config::load()?;
+            JmapClient::try_new(config.get_token()?)?
+        }
+    };
     client.authenticate().await?;
     Ok(client)
 }
@@ -143,6 +142,15 @@ struct UploadedAttachment {
     blob_id: String,
     filename: String,
     content_type: String,
+}
+
+fn addresses_json(addresses: &[EmailAddress]) -> Value {
+    Value::Array(
+        addresses
+            .iter()
+            .map(|address| json!({"email": address.email, "name": address.name}))
+            .collect(),
+    )
 }
 
 /// Build bodyValues and body structure fields on `email_create`.
@@ -191,20 +199,17 @@ fn apply_body_structure(
             "bodyStructure".into(),
             json!({ "type": "multipart/mixed", "subParts": sub_parts }),
         );
-    } else if has_html {
-        email_create.insert(
-            "textBody".into(),
-            json!([{ "partId": "textBody", "type": "text/plain" }]),
-        );
-        email_create.insert(
-            "htmlBody".into(),
-            json!([{ "partId": "htmlBody", "type": "text/html" }]),
-        );
     } else {
         email_create.insert(
             "textBody".into(),
             json!([{ "partId": "textBody", "type": "text/plain" }]),
         );
+        if has_html {
+            email_create.insert(
+                "htmlBody".into(),
+                json!([{ "partId": "htmlBody", "type": "text/html" }]),
+            );
+        }
     }
 }
 
@@ -370,54 +375,40 @@ pub fn normalize_date(date: &str) -> String {
 pub fn search_filter_to_jmap(filter: &SearchFilter, mailbox_id: Option<&str>) -> Value {
     let mut f = json!({});
 
-    let mut set = |key: &str, value: Value| {
-        f[key] = value;
-    };
-
-    if let Some(ref text) = filter.text {
-        set("text", json!(text));
-    }
-    if let Some(ref from) = filter.from {
-        set("from", json!(from));
-    }
-    if let Some(ref to) = filter.to {
-        set("to", json!(to));
-    }
-    if let Some(ref cc) = filter.cc {
-        set("cc", json!(cc));
-    }
-    if let Some(ref bcc) = filter.bcc {
-        set("bcc", json!(bcc));
-    }
-    if let Some(ref subject) = filter.subject {
-        set("subject", json!(subject));
-    }
-    if let Some(ref body) = filter.body {
-        set("body", json!(body));
-    }
-    if let Some(mailbox) = mailbox_id {
-        set("inMailbox", json!(mailbox));
+    for (key, value) in [
+        ("text", filter.text.as_deref()),
+        ("from", filter.from.as_deref()),
+        ("to", filter.to.as_deref()),
+        ("cc", filter.cc.as_deref()),
+        ("bcc", filter.bcc.as_deref()),
+        ("subject", filter.subject.as_deref()),
+        ("body", filter.body.as_deref()),
+        ("inMailbox", mailbox_id),
+    ] {
+        if let Some(value) = value {
+            f[key] = json!(value);
+        }
     }
     if filter.has_attachment {
-        set("hasAttachment", json!(true));
+        f["hasAttachment"] = json!(true);
     }
     if let Some(min_size) = filter.min_size {
-        set("minSize", json!(min_size));
+        f["minSize"] = json!(min_size);
     }
     if let Some(max_size) = filter.max_size {
-        set("maxSize", json!(max_size));
+        f["maxSize"] = json!(max_size);
     }
     if let Some(ref before) = filter.before {
-        set("before", json!(normalize_date(before)));
+        f["before"] = json!(normalize_date(before));
     }
     if let Some(ref after) = filter.after {
-        set("after", json!(normalize_date(after)));
+        f["after"] = json!(normalize_date(after));
     }
     if filter.unread {
-        set("notKeyword", json!("$seen"));
+        f["notKeyword"] = json!("$seen");
     }
     if filter.flagged {
-        set("hasKeyword", json!("$flagged"));
+        f["hasKeyword"] = json!("$flagged");
     }
 
     f
@@ -592,6 +583,31 @@ fn dedup_by_email(addrs: &mut Vec<EmailAddress>) {
     addrs.retain(|a| seen.insert(a.email.to_lowercase()));
 }
 
+fn check_jmap_status(status: reqwest::StatusCode, unauthorized: &'static str) -> Result<()> {
+    match status.as_u16() {
+        401 => Err(Error::InvalidToken(unauthorized)),
+        429 => Err(Error::RateLimited),
+        500..=599 => Err(Error::Server(format!("Server error: {status}"))),
+        _ => Ok(()),
+    }
+}
+
+fn method_error(method: &str, error: &Value, fallback: &str) -> Error {
+    Error::Jmap {
+        method: method.into(),
+        error_type: error
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .into(),
+        description: error
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback)
+            .into(),
+    }
+}
+
 impl JmapClient {
     /// Infallible compatibility constructor. Servers should use `try_new`.
     pub fn new(token: String) -> Self {
@@ -682,12 +698,7 @@ impl JmapClient {
             .await?;
         let resp = self.check_proxy_response(resp).await?;
 
-        match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Authentication failed")),
-            429 => return Err(Error::RateLimited),
-            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            _ => {}
-        }
+        check_jmap_status(resp.status(), "Authentication failed")?;
 
         crate::util::check_response_status(&resp)?;
         let bytes =
@@ -752,12 +763,7 @@ impl JmapClient {
             .await?;
         let resp = self.check_proxy_response(resp).await?;
 
-        match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Token expired or invalid")),
-            429 => return Err(Error::RateLimited),
-            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            _ => {}
-        }
+        check_jmap_status(resp.status(), "Token expired or invalid")?;
 
         crate::util::check_response_status(&resp)?;
         let body =
@@ -780,19 +786,7 @@ impl JmapClient {
 
         if method_name == "error" {
             let error_obj = arr.get(1).unwrap_or(&Value::Null);
-            let error_type = error_obj
-                .get("type")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("unknown");
-            let description = error_obj
-                .get("description")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("No description");
-            return Err(Error::Jmap {
-                method: expected_method.into(),
-                error_type: error_type.into(),
-                description: description.into(),
-            });
+            return Err(method_error(expected_method, error_obj, "No description"));
         }
 
         let data = arr.get(1).ok_or_else(|| Error::Jmap {
@@ -858,10 +852,11 @@ impl JmapClient {
             return Ok(m.clone());
         }
 
-        if let Some(m) = mailboxes
-            .iter()
-            .find(|m| m.role.as_deref().map(|r: &str| r.to_lowercase()) == Some(name_lower.clone()))
-        {
+        if let Some(m) = mailboxes.iter().find(|m| {
+            m.role
+                .as_deref()
+                .is_some_and(|role| role.to_lowercase() == name_lower)
+        }) {
             return Ok(m.clone());
         }
 
@@ -1176,12 +1171,7 @@ impl JmapClient {
         let resp = req.send().await?;
         let resp = self.check_proxy_response(resp).await?;
 
-        match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Token expired or invalid")),
-            429 => return Err(Error::RateLimited),
-            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            _ => {}
-        }
+        check_jmap_status(resp.status(), "Token expired or invalid")?;
 
         crate::util::check_response_status(&resp)?;
         if !resp
@@ -1349,19 +1339,7 @@ impl JmapClient {
         if let Some(ref not_created) = email_resp.not_created
             && let Some(err) = not_created.get("email")
         {
-            let error_type = err
-                .get("type")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("unknown");
-            let description = err
-                .get("description")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("Failed to create email");
-            return Err(Error::Jmap {
-                method: "Email/set".into(),
-                error_type: error_type.into(),
-                description: description.into(),
-            });
+            return Err(method_error("Email/set", err, "Failed to create email"));
         }
 
         // Check EmailSubmission/set response if present (index 1)
@@ -1371,30 +1349,21 @@ impl JmapClient {
             if let Some(ref not_created) = sub.not_created
                 && let Some(err) = not_created.get("submission")
             {
-                let error_type = err
-                    .get("type")
-                    .and_then(|v: &Value| v.as_str())
-                    .unwrap_or("unknown");
-                let description = err
-                    .get("description")
-                    .and_then(|v: &Value| v.as_str())
-                    .unwrap_or("Email created but submission failed");
-                return Err(Error::Jmap {
-                    method: "EmailSubmission/set".into(),
-                    error_type: error_type.into(),
-                    description: description.into(),
-                });
+                return Err(method_error(
+                    "EmailSubmission/set",
+                    err,
+                    "Email created but submission failed",
+                ));
             }
         }
 
         email_resp
             .created
-            .and_then(|c: HashMap<String, Value>| c.get("email").cloned())
-            .and_then(|d: Value| {
-                d.get("id")
-                    .and_then(|v: &Value| v.as_str())
-                    .map(String::from)
-            })
+            .as_ref()
+            .and_then(|created| created.get("email"))
+            .and_then(|email| email.get("id"))
+            .and_then(Value::as_str)
+            .map(String::from)
             .ok_or_else(|| Error::Jmap {
                 method: "Email/set".into(),
                 error_type: "unknown".into(),
@@ -1409,23 +1378,14 @@ impl JmapClient {
         ctx: &ComposeContext,
         draft: EmailDraft<'_>,
     ) -> Result<String> {
-        fn addrs_json(addrs: &[EmailAddress]) -> Value {
-            json!(
-                addrs
-                    .iter()
-                    .map(|a| json!({"email": a.email, "name": a.name}))
-                    .collect::<Vec<_>>()
-            )
-        }
-
         let mut email_create: HashMap<String, Value> = HashMap::new();
         ctx.apply_to_email(&mut email_create);
-        email_create.insert("to".into(), addrs_json(draft.to));
+        email_create.insert("to".into(), addresses_json(draft.to));
         if !draft.cc.is_empty() {
-            email_create.insert("cc".into(), addrs_json(draft.cc));
+            email_create.insert("cc".into(), addresses_json(draft.cc));
         }
         if !draft.bcc.is_empty() {
-            email_create.insert("bcc".into(), addrs_json(draft.bcc));
+            email_create.insert("bcc".into(), addresses_json(draft.bcc));
         }
         email_create.insert("subject".into(), json!(draft.subject));
 
@@ -1517,19 +1477,7 @@ impl JmapClient {
         if let Some(ref not_updated) = resp.not_updated
             && let Some(err) = not_updated.get(email_id)
         {
-            let error_type = err
-                .get("type")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("unknown");
-            let description = err
-                .get("description")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("Failed to move email");
-            return Err(Error::Jmap {
-                method: "Email/set".into(),
-                error_type: error_type.into(),
-                description: description.into(),
-            });
+            return Err(method_error("Email/set", err, "Failed to move email"));
         }
 
         Ok(())
@@ -1565,12 +1513,9 @@ impl JmapClient {
         let resp = self.authorize(self.client.get(&url)).send().await?;
         let resp = self.check_proxy_response(resp).await?;
 
-        match resp.status().as_u16() {
-            401 => return Err(Error::InvalidToken("Token expired or invalid")),
-            404 => return Err(Error::Config(format!("Blob not found: {}", blob_id))),
-            429 => return Err(Error::RateLimited),
-            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            _ => {}
+        check_jmap_status(resp.status(), "Token expired or invalid")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Error::Config(format!("Blob not found: {}", blob_id)));
         }
 
         crate::util::check_response_status(&resp)?;
@@ -1599,14 +1544,9 @@ impl JmapClient {
             .await?;
         let resp = self.check_proxy_response(resp).await?;
 
-        match resp.status().as_u16() {
-            200..=299 => {}
-            401 => return Err(Error::InvalidToken("Token expired or invalid")),
-            429 => return Err(Error::RateLimited),
-            500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            _ => {
-                return Err(Error::Server(format!("Upload failed ({})", resp.status())));
-            }
+        check_jmap_status(resp.status(), "Token expired or invalid")?;
+        if !resp.status().is_success() {
+            return Err(Error::Server(format!("Upload failed ({})", resp.status())));
         }
 
         let bytes =
@@ -1781,19 +1721,7 @@ impl JmapClient {
         if let Some(ref not_updated) = resp.not_updated
             && let Some(err) = not_updated.get(email_id)
         {
-            let error_type = err
-                .get("type")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("unknown");
-            let description = err
-                .get("description")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("Failed to update keywords");
-            return Err(Error::Jmap {
-                method: "Email/set".into(),
-                error_type: error_type.into(),
-                description: description.into(),
-            });
+            return Err(method_error("Email/set", err, "Failed to update keywords"));
         }
 
         Ok(())
@@ -1863,19 +1791,11 @@ impl JmapClient {
         if let Some(ref not_created) = resp.not_created
             && let Some(err) = not_created.get("new")
         {
-            let error_type = err
-                .get("type")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("unknown");
-            let description = err
-                .get("description")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("Failed to create masked email");
-            return Err(Error::Jmap {
-                method: "MaskedEmail/set".into(),
-                error_type: error_type.into(),
-                description: description.into(),
-            });
+            return Err(method_error(
+                "MaskedEmail/set",
+                err,
+                "Failed to create masked email",
+            ));
         }
 
         resp.created
@@ -1927,19 +1847,11 @@ impl JmapClient {
         if let Some(ref not_updated) = resp.not_updated
             && let Some(err) = not_updated.get(id)
         {
-            let error_type = err
-                .get("type")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("unknown");
-            let description = err
-                .get("description")
-                .and_then(|v: &Value| v.as_str())
-                .unwrap_or("Failed to update masked email");
-            return Err(Error::Jmap {
-                method: "MaskedEmail/set".into(),
-                error_type: error_type.into(),
-                description: description.into(),
-            });
+            return Err(method_error(
+                "MaskedEmail/set",
+                err,
+                "Failed to update masked email",
+            ));
         }
 
         Ok(())
@@ -1949,6 +1861,102 @@ impl JmapClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_status_classification_keeps_errors_and_endpoint_fallbacks_distinct() {
+        for message in ["Authentication failed", "Token expired or invalid"] {
+            for code in [200, 204, 302, 400, 401, 404, 413, 429, 500, 503, 599] {
+                let status = reqwest::StatusCode::from_u16(code).unwrap();
+                let result = check_jmap_status(status, message);
+                match code {
+                    401 => assert!(
+                        matches!(result, Err(Error::InvalidToken(value)) if value == message)
+                    ),
+                    429 => assert!(matches!(result, Err(Error::RateLimited))),
+                    500..=599 => assert!(
+                        matches!(result, Err(Error::Server(value)) if value == format!("Server error: {status}"))
+                    ),
+                    _ => assert!(result.is_ok()),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn method_errors_preserve_upstream_fields_and_fallbacks() {
+        for (payload, expected_type, expected_description) in [
+            (
+                json!({"type":"forbidden", "description":"Not allowed"}),
+                "forbidden",
+                "Not allowed",
+            ),
+            (json!({"type":"", "description":""}), "", ""),
+            (
+                json!({"type":42, "description":false}),
+                "unknown",
+                "Fallback",
+            ),
+            (Value::Null, "unknown", "Fallback"),
+        ] {
+            let error = method_error("Email/set", &payload, "Fallback");
+            assert_eq!(
+                error.to_string(),
+                format!("JMAP error: Email/set failed - {expected_type}: {expected_description}")
+            );
+        }
+    }
+
+    #[test]
+    fn address_serialization_preserves_explicit_null_names_and_key_order() {
+        let addresses = vec![
+            EmailAddress {
+                name: None,
+                email: "a@example.test".into(),
+            },
+            EmailAddress {
+                name: Some("A Name".into()),
+                email: "b@example.test".into(),
+            },
+        ];
+        assert_eq!(
+            addresses_json(&addresses).to_string(),
+            r#"[{"email":"a@example.test","name":null},{"email":"b@example.test","name":"A Name"}]"#,
+        );
+    }
+
+    #[test]
+    fn cli_search_mapping_preserves_every_field_and_omits_unset_flags() {
+        let filter = SearchFilter {
+            text: Some("".into()),
+            from: Some("from".into()),
+            to: Some("to".into()),
+            cc: Some("cc".into()),
+            bcc: Some("bcc".into()),
+            subject: Some("subject".into()),
+            body: Some("body".into()),
+            mailbox: Some("not-an-id".into()),
+            has_attachment: true,
+            min_size: Some(0),
+            max_size: Some(99),
+            before: Some("2026-01-01".into()),
+            after: Some("2025-01-01T12:00:00Z".into()),
+            unread: true,
+            flagged: true,
+        };
+        assert_eq!(
+            search_filter_to_jmap(&filter, Some("mb1")),
+            json!({
+                "text":"", "from":"from", "to":"to", "cc":"cc", "bcc":"bcc", "subject":"subject",
+                "body":"body", "inMailbox":"mb1", "hasAttachment":true, "minSize":0, "maxSize":99,
+                "before":"2026-01-01T00:00:00Z", "after":"2025-01-01T12:00:00Z",
+                "notKeyword":"$seen", "hasKeyword":"$flagged",
+            })
+        );
+        assert_eq!(
+            search_filter_to_jmap(&SearchFilter::default(), None),
+            json!({})
+        );
+    }
 
     fn create_test_session(capabilities: Vec<&str>) -> Session {
         let mut caps = HashMap::new();
