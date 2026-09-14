@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [4.0.1] - 2026-09-13
+## [4.0.1] - 2026-09-14
 
 ### Fixed
 
@@ -19,8 +19,9 @@
 - Disable subscription record caching, restore pageInfo-only cursors, and return
   structured session health on cold credential and connectivity failures.
 - Require an account/email-bound, expiring one-shot token for spam confirmation.
-- Enforce encoded image byte limits, reject invalid size arguments, preserve
-  remote error details, and avoid attachment filename collisions without overwriting.
+- Enforce encoded image byte limits with bounded resize work, reject invalid size
+  arguments, report skipped images without losing other downloads, preserve remote
+  error details/classification, and avoid attachment filename collisions without overwriting.
 - Connect GraphiQL subscriptions to the HTTP SSE endpoint using the standard
   distinct-connection `graphql-sse` protocol (`next`/`complete` events). Subscriber
   reconnects are explicitly non-resumable; the IDE does not silently reconnect.
