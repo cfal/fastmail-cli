@@ -364,7 +364,12 @@ async fn mail_and_contact_commands_use_http_without_local_credentials() {
         );
         assert!(!req.headers.contains_key("x-fastmail-token"));
     }
-    assert!(!home.path().join("fastmail-cli/config.toml").exists());
+    assert!(
+        !home
+            .path()
+            .join(".config/fastmail-cli/config.toml")
+            .exists()
+    );
 }
 
 #[tokio::test]

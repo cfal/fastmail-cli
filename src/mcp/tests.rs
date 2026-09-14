@@ -26,7 +26,7 @@ fn request(method: &str, path: &str, body: Body) -> Request<Body> {
 }
 
 #[tokio::test]
-async fn json_routes_limit_declared_and_streamed_bodies_to_two_mib() {
+async fn json_routes_limit_sized_and_streamed_bodies_to_two_mib() {
     use async_graphql::futures_util::stream;
     const LIMIT: usize = 2 * 1024 * 1024;
     let router = in_process_router(
@@ -45,12 +45,17 @@ async fn json_routes_limit_declared_and_streamed_bodies_to_two_mib() {
         "/cli/v1/jmap",
         "/cli/v1/contacts",
     ] {
-        for declared in [true, false] {
-            let chunks = std::iter::repeat_n(chunk.clone(), LIMIT / chunk.len())
-                .map(Ok::<_, std::io::Error>)
-                .chain([Ok(Bytes::from_static(b" "))]);
-            let mut req = request("POST", path, Body::from_stream(stream::iter(chunks)));
-            if declared {
+        for sized in [true, false] {
+            let body = if sized {
+                Body::from(vec![b' '; LIMIT + 1])
+            } else {
+                let chunks = std::iter::repeat_n(chunk.clone(), LIMIT / chunk.len())
+                    .map(Ok::<_, std::io::Error>)
+                    .chain([Ok(Bytes::from_static(b" "))]);
+                Body::from_stream(stream::iter(chunks))
+            };
+            let mut req = request("POST", path, body);
+            if sized {
                 req.headers_mut()
                     .insert("content-length", (LIMIT + 1).to_string().parse().unwrap());
             }
@@ -58,7 +63,7 @@ async fn json_routes_limit_declared_and_streamed_bodies_to_two_mib() {
             assert_eq!(
                 response.status(),
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "{path}, declared={declared}"
+                "{path}, sized={sized}"
             );
             assert_eq!(response.headers()["cache-control"], "no-store");
             if path == "/mcp" {
