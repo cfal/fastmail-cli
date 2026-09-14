@@ -2055,6 +2055,16 @@ async fn compose(
 #[tokio::test]
 async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
     let server = mock_server(1).await;
+    let subject_of = |preview: &Value| {
+        preview["preview"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("Subject: "))
+            .unwrap()
+            .to_string()
+    };
+    let mut reviewed_subjects = Vec::new();
     Mock::given(|req: &wiremock::Request| {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         body["methodCalls"].as_array().is_some_and(|calls| {
@@ -2106,6 +2116,7 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
             params["emailId"] = json!("e0");
         }
         let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+        reviewed_subjects.push(subject_of(&preview));
         assert!(
             preview["preview"]
                 .as_str()
@@ -2134,6 +2145,7 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
         .await;
         assert_eq!(replay["success"], false);
         let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+        reviewed_subjects.push(subject_of(&preview));
         let draft = compose(
             &schema,
             client,
@@ -2147,6 +2159,7 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
     }
     let mut submissions = 0;
     let mut creates = 0;
+    let mut submitted_subjects = Vec::new();
     for req in server.received_requests().await.unwrap() {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         for call in body["methodCalls"].as_array().into_iter().flatten() {
@@ -2166,6 +2179,7 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
             }
             creates += 1;
             let email = &call[1]["create"]["email"];
+            submitted_subjects.push(email["subject"].as_str().unwrap().to_string());
             assert_eq!(email["mailboxIds"], json!({"drafts":true}));
             assert_eq!(email["keywords"]["$draft"], true);
             assert_eq!(email["cc"][0]["email"], "cc@example.com");
@@ -2182,6 +2196,7 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
     }
     assert_eq!(creates, 6);
     assert_eq!(submissions, 3);
+    assert_eq!(submitted_subjects, reviewed_subjects);
 }
 
 #[tokio::test]

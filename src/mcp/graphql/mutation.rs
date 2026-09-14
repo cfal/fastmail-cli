@@ -3,6 +3,7 @@
 use async_graphql::{Context, Object, Result};
 
 use crate::carddav::{ContactEmail, ContactPhone};
+use crate::jmap::prefixed_subject;
 use crate::models::EmailAddress;
 use crate::util::parse_addresses;
 
@@ -113,15 +114,7 @@ impl MutationRoot {
         let extra_cc = cc.as_deref().map(parse_addresses).unwrap_or_default();
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
 
-        let subject = if original
-            .subject
-            .as_ref()
-            .is_some_and(|s| s.to_lowercase().starts_with("re:"))
-        {
-            original.subject.clone().unwrap_or_default()
-        } else {
-            format!("Re: {}", original.subject.as_deref().unwrap_or(""))
-        };
+        let subject = prefixed_subject(original.subject.as_deref(), "Re:");
 
         // Compute the final recipient lists once, up front. Both PREVIEW
         // (for display) and CONFIRM/DRAFT (for the actual send) use these
@@ -224,15 +217,7 @@ impl MutationRoot {
         let cc_addrs = cc.as_deref().map(parse_addresses).unwrap_or_default();
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
 
-        let subject = if original
-            .subject
-            .as_ref()
-            .is_some_and(|s| s.to_lowercase().starts_with("fwd:"))
-        {
-            original.subject.clone().unwrap_or_default()
-        } else {
-            format!("Fwd: {}", original.subject.as_deref().unwrap_or(""))
-        };
+        let subject = prefixed_subject(original.subject.as_deref(), "Fwd:");
 
         let sender = client.resolve_my_email(from.as_deref()).await;
         let binding = compose_binding(

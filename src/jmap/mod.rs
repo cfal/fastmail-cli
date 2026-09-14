@@ -144,6 +144,15 @@ struct UploadedAttachment {
     content_type: String,
 }
 
+pub(crate) fn prefixed_subject(subject: Option<&str>, prefix: &str) -> String {
+    let subject = subject.unwrap_or("");
+    if subject.to_lowercase().starts_with(&prefix.to_lowercase()) {
+        subject.to_string()
+    } else {
+        format!("{prefix} {subject}")
+    }
+}
+
 fn addresses_json(addresses: &[EmailAddress]) -> Value {
     Value::Array(
         addresses
@@ -1578,16 +1587,7 @@ impl JmapClient {
         let to_addrs = to;
         let cc_addrs = params.cc;
 
-        // Build subject with Re: prefix if not already present
-        let subject = if original
-            .subject
-            .as_ref()
-            .is_some_and(|s| s.to_lowercase().starts_with("re:"))
-        {
-            original.subject.clone().unwrap_or_default()
-        } else {
-            format!("Re: {}", original.subject.as_deref().unwrap_or(""))
-        };
+        let subject = prefixed_subject(original.subject.as_deref(), "Re:");
 
         // Build References header: original references + original message-id
         let references: Vec<String> = {
@@ -1632,16 +1632,7 @@ impl JmapClient {
     ) -> Result<String> {
         let ctx = self.prepare_compose(params.from, params.draft).await?;
 
-        // Build subject with Fwd: prefix if not already present
-        let subject = if original
-            .subject
-            .as_ref()
-            .is_some_and(|s| s.to_lowercase().starts_with("fwd:"))
-        {
-            original.subject.clone().unwrap_or_default()
-        } else {
-            format!("Fwd: {}", original.subject.as_deref().unwrap_or(""))
-        };
+        let subject = prefixed_subject(original.subject.as_deref(), "Fwd:");
 
         // Build forwarded body with attribution
         let original_body = original.text_content().unwrap_or_default();
@@ -1861,6 +1852,27 @@ impl JmapClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subject_prefixes_preserve_case_whitespace_and_missing_subjects() {
+        for (subject, reply, forward) in [
+            (None, "Re: ", "Fwd: "),
+            (Some(""), "Re: ", "Fwd: "),
+            (Some("Subject"), "Re: Subject", "Fwd: Subject"),
+            (Some("Re:"), "Re:", "Fwd: Re:"),
+            (Some("rE: Subject"), "rE: Subject", "Fwd: rE: Subject"),
+            (Some("fWd: Subject"), "Re: fWd: Subject", "fWd: Subject"),
+            (
+                Some(" Re: Subject"),
+                "Re:  Re: Subject",
+                "Fwd:  Re: Subject",
+            ),
+            (Some("rE: \u{130}"), "rE: \u{130}", "Fwd: rE: \u{130}"),
+        ] {
+            assert_eq!(prefixed_subject(subject, "Re:"), reply);
+            assert_eq!(prefixed_subject(subject, "Fwd:"), forward);
+        }
+    }
 
     #[test]
     fn http_status_classification_keeps_errors_and_endpoint_fallbacks_distinct() {
