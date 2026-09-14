@@ -287,11 +287,7 @@ impl CardDavClient {
             .descendants()
             .filter(|n| n.has_tag_name((dav_ns, "response")))
         {
-            if let Some(vcard_data) = response
-                .descendants()
-                .find(|n| n.has_tag_name((carddav_ns, "address-data")))
-                .and_then(|n| n.text())
-            {
+            if let Some(vcard_data) = dav_property(response, carddav_ns, "address-data") {
                 let href = response
                     .descendants()
                     .find(|n| n.has_tag_name((dav_ns, "href")))
@@ -312,7 +308,10 @@ impl CardDavClient {
             return Ok(None);
         };
         if contact.id.is_empty() {
-            let url = self.resource_url(href)?;
+            let Ok(url) = self.resource_url(href) else {
+                debug!("Skipping UID-less contact with an invalid resource URL");
+                return Ok(None);
+            };
             contact.id = format!("href:{}", URL_SAFE_NO_PAD.encode(url.as_str()));
         }
         Ok(Some(contact))
@@ -403,18 +402,13 @@ impl CardDavClient {
                     .and_then(|n| n.text())
                     .unwrap_or_default();
 
-                if let Some(vcard_data) = response
-                    .descendants()
-                    .find(|n| n.has_tag_name((carddav_ns, "address-data")))
-                    .and_then(|n| n.text())
+                if let Some(vcard_data) = dav_property(response, carddav_ns, "address-data")
                     && self
                         .contact_at(vcard_data, href)?
                         .is_some_and(|c| c.id == contact_id)
                 {
-                    let etag = response
-                        .descendants()
-                        .find(|n| n.has_tag_name((dav_ns, "getetag")))
-                        .and_then(|n| n.text())
+                    let etag = dav_property(response, dav_ns, "getetag")
+                        .map(str::trim)
                         .filter(|value| value.starts_with('"') && value.ends_with('"'))
                         .ok_or_else(|| {
                             Error::Server(
@@ -591,6 +585,36 @@ impl CardDavClient {
 
         Ok(())
     }
+}
+
+fn dav_property<'a, 'input>(
+    response: roxmltree::Node<'a, 'input>,
+    namespace: &str,
+    name: &str,
+) -> Option<&'a str> {
+    for propstat in response
+        .children()
+        .filter(|n| n.has_tag_name(("DAV:", "propstat")))
+    {
+        let status = propstat
+            .children()
+            .find(|n| n.has_tag_name(("DAV:", "status")))
+            .and_then(|n| n.text());
+        if status.and_then(|s| s.split_ascii_whitespace().nth(1)) != Some("200") {
+            continue;
+        }
+        if let Some(value) = propstat
+            .children()
+            .filter(|n| n.has_tag_name(("DAV:", "prop")))
+            .flat_map(|n| n.children())
+            .filter(|n| n.has_tag_name((namespace, name)))
+            .filter_map(|n| n.text())
+            .find(|value| !value.trim().is_empty())
+        {
+            return Some(value);
+        }
+    }
+    None
 }
 
 async fn read_response(response: reqwest::Response) -> Result<String> {
@@ -1126,9 +1150,68 @@ mod tests {
             r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#
         )).mount(&server).await;
         Mock::given(method("REPORT")).respond_with(ResponseTemplate::new(207).set_body_string(format!(
-            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/contact.vcf</d:href><d:propstat><d:prop><d:getetag>{etag}</d:getetag><c:address-data><![CDATA[{vcard}]]></c:address-data></d:prop></d:propstat></d:response></d:multistatus>"#
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/contact.vcf</d:href><d:propstat><d:prop><d:getetag>{etag}</d:getetag><c:address-data><![CDATA[{vcard}]]></c:address-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
         ))).mount(&server).await;
         (client, server)
+    }
+
+    #[tokio::test]
+    async fn contact_mutations_use_successful_properties_and_trim_etags() {
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{header, method},
+        };
+        let original = "BEGIN:VCARD\nUID:contact\nFN:Name\nEND:VCARD\n";
+        let (client, server) = contact_server(original, "\"old\"").await;
+        Mock::given(method("REPORT")).respond_with(
+            ResponseTemplate::new(207).set_body_string(format!(
+                r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/contact.vcf</d:href><d:propstat><d:prop><d:getetag/><c:address-data/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat><d:propstat><d:prop><d:getetag>
+                "version-1"
+                </d:getetag><c:address-data><![CDATA[{original}]]></c:address-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
+            ))
+        ).with_priority(1).mount(&server).await;
+        for verb in ["PUT", "DELETE"] {
+            Mock::given(method(verb))
+                .and(header("If-Match", "\"version-1\""))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        client
+            .update_contact(
+                "contact",
+                &ContactFields {
+                    title: Some("New"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        client.delete_contact("contact").await.unwrap();
+    }
+
+    #[test]
+    fn bad_uidless_resources_do_not_abort_contact_listing() {
+        let client = CardDavClient::try_new("user".into(), "password".into()).unwrap();
+        let responses = ["contact.vcf", "", "/books/good.vcf"].into_iter().map(|href| format!(
+            r#"<d:response><d:href>{href}</d:href><d:propstat><d:prop><c:address-data>BEGIN:VCARD
+FN:Name
+END:VCARD
+</c:address-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#
+        )).collect::<String>();
+        let contacts = client.parse_contacts_response(&format!(
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">{responses}</d:multistatus>"#
+        )).unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(
+            contacts[0].id,
+            client
+                .contact_at("FN:Name", "/books/good.vcf")
+                .unwrap()
+                .unwrap()
+                .id
+        );
     }
 
     #[tokio::test]
@@ -1225,6 +1308,28 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|r| r.method == "PUT" || r.method == "DELETE")
+        );
+    }
+
+    #[tokio::test]
+    async fn weak_etags_never_allow_unconditional_mutations() {
+        let (client, server) =
+            contact_server("BEGIN:VCARD\nUID:contact\nFN:Name\nEND:VCARD\n", "W/\"v1\"").await;
+        assert!(
+            client
+                .delete_contact("contact")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("strong ETag")
+        );
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.method == "DELETE")
         );
     }
 
