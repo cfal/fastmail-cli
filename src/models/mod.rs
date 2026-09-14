@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+mod readable_body;
+pub use readable_body::{BodyPreference, ReadableBody, ReadableBodyFormat, ReadableBodySource};
+
+#[cfg(test)]
+mod readable_body_tests;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -209,15 +215,16 @@ impl Email {
         self.keywords.contains_key("$draft")
     }
 
-    /// Every text part joined, not just the first.
+    /// Every JMAP text-preferred part joined, not just the first.
     ///
     /// A multipart message can carry several text parts; returning only the
     /// leading one silently dropped the rest.
+    /// JMAP may include HTML here. Use [`Self::readable_body`] for readable content.
     pub fn text_content(&self) -> Option<String> {
         self.joined_body(self.text_body.as_deref())
     }
 
-    /// Every HTML part joined. See [`Self::text_content`].
+    /// Every JMAP HTML-preferred part joined. See [`Self::text_content`].
     pub fn html_content(&self) -> Option<String> {
         self.joined_body(self.html_body.as_deref())
     }

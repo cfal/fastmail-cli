@@ -22,6 +22,8 @@ clap = { version = "4.5.54", features = ["derive", "env"] }
 clap_complete = "4.5.65"
 dirs = "6.0.0"
 email_address = { version = "0.2.9", default-features = false }
+html-escape = "0.2"
+html-to-markdown-rs = { version = "~3.12.4", default-features = false, features = ["visitor"] }
 http = "1"
 http-body-util = "0.1"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
@@ -54,6 +56,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+pulldown-cmark = "0.13"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 # `test-util` for the paused clock, so backoff tests assert timing without waiting it out.
