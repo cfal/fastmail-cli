@@ -107,6 +107,11 @@ pub(crate) async fn check_response(response: reqwest::Response) -> Result<reqwes
     if status.is_success() {
         return Ok(response);
     }
+    match status.as_u16() {
+        401 => return Err(Error::InvalidToken("HTTP server login rejected (401)")),
+        429 => return Err(Error::RateLimited),
+        _ => {}
+    }
     let fallback = || Error::Server(format!("HTTP server request failed ({status})"));
     let bytes = crate::util::read_bounded_response(response, 16 * 1024)
         .await
@@ -128,6 +133,28 @@ pub(crate) async fn check_response(response: reqwest::Response) -> Result<reqwes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn proxy_authentication_and_rate_limits_keep_their_classification() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        for status in [401, 429] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("not JSON"))
+                .mount(&server)
+                .await;
+            let client = HttpServer::new(&server.uri(), None, None).unwrap();
+            let error = client
+                .contacts::<()>(serde_json::json!({"operation":"list"}))
+                .await
+                .unwrap_err();
+            match status {
+                401 => assert!(matches!(error, Error::InvalidToken(_)), "{error:?}"),
+                429 => assert!(matches!(error, Error::RateLimited), "{error:?}"),
+                _ => unreachable!(),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn carddav_proxy_errors_preserve_details_but_ignore_non_json_bodies() {
