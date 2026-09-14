@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Send from concrete addresses authorized by JMAP domain identities (`*@domain`),
+  preferring exact identities and retaining the domain identity's submission ID.
+- Accept `Name <address>` in `--from` and GraphQL/MCP compose mutations for a
+  per-message sender name, including replies, forwards, and drafts.
+
+### Fixed
+
+- Never choose a wildcard address as the default sender. Reject invalid explicit
+  senders before creating mail. Explicit senders must resolve successfully even
+  for drafts, including when identity lookup is unavailable.
+- Keep resolved sender names in GraphQL confirmation previews and bindings.
+
 ## [4.0.2] - 2026-09-14
 
 ### Added

@@ -11,11 +11,18 @@ command unless the user also requested a saved draft or a send.
 fastmail list identities
 ```
 
-`--from` takes an identity's **email address**, not its ID. Sending requires a
-matching identity (case-insensitive); without `--from`, the first returned
-identity is used. Specify it when the intended alias matters. Saving a draft can
-succeed without resolving an identity, so draft success does not prove the
-sender is valid for submission.
+`--from` takes an **email address**, not an identity ID. An exact identity wins
+(case-insensitive); otherwise a `*@example.com` identity permits any concrete
+address at that domain, not its subdomains. Never pass the literal wildcard as
+the sender. Without `--from`, the first non-wildcard identity is used; an account
+with only wildcard identities requires an explicit sender.
+
+Use `--from 'My Team <new-address@example.com>'` to override the display name
+for that message without changing any saved identity. A bare address keeps the
+selected identity's name. Send, reply, forward, and drafts share these rules.
+An explicitly supplied sender must resolve even for a draft. Without `--from`,
+a draft can still be saved when identity resolution is unavailable, so draft
+success alone does not prove sending will work.
 
 Recipient flags accept comma-separated addresses, optionally `Name <email>`.
 The parser splits on commas; avoid display names containing commas. Review the

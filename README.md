@@ -270,6 +270,16 @@ View available sender identities (useful for `--from`):
 fastmail list identities
 ```
 
+`--from` accepts an email address or `Name <address>`. Exact identities take
+precedence over domain identities such as `*@yourdomain.com`, which authorize
+any concrete address at that domain (not its subdomains). Supply the concrete
+address, never the literal wildcard. Without `--from`, the first non-wildcard
+identity is used; wildcard-only accounts require an explicit address.
+
+The optional name overrides the display name for that message only. It does not
+create or modify an identity. This also applies to replies, forwards, drafts,
+and the GraphQL/MCP compose mutations' `from` argument.
+
 ### Send Email
 
 ```bash
@@ -290,6 +300,13 @@ fastmail send \
 fastmail send \
   --to "alice@example.com" \
   --from "alias@yourdomain.com" \
+  --subject "Hello" \
+  --body "Message"
+
+# Send through a domain identity with a per-message display name
+fastmail send \
+  --to "alice@example.com" \
+  --from "My Team <new-address@yourdomain.com>" \
   --subject "Hello" \
   --body "Message"
 

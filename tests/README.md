@@ -15,7 +15,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 ## Organization
 
 - `src/carddav/tests.rs`: DAV parsing, property-preserving writes, conditional mutations, URL and credential isolation.
-- `src/jmap/tests.rs`: request shapes, capability and object limits, composition, recipients, uploads, and HTTP error classification.
+- `src/jmap/tests.rs`: request shapes, capability and object limits, composition, exact/domain sender selection, recipients, uploads, and HTTP error classification.
 - `src/jmap/events.rs` and `src/jmap/watch.rs`: streaming parser boundaries, cursor retention, resync, reconnects, filtering, and fatal errors.
 - `src/mcp/tests.rs`: complete HTTP router contracts, MCP tools, transport routing, and server-owned credentials.
 - `src/mcp/http_security.rs`: Basic auth, browser policy, and exact-bound request preservation.
@@ -23,7 +23,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 - `src/mcp/graphql/tests/`: schema, connections, resolution and batching, attachments, mutations, sessions, and subscriptions. Shared JMAP fixtures remain in `src/mcp/graphql/tests.rs`.
 - Small pure helpers retain tests beside their implementations, including GraphQL input limits, filters, SDL slicing, image bounds, and model serialization.
 - `tests/config.rs`: real configuration getters and persistence in child processes with isolated homes and environment variables.
-- `tests/http_cli.rs`: executable-level output, exit status, remote transport, downloads, and destructive-command confirmation.
+- `tests/http_cli.rs`: executable-level output, exit status, remote transport, domain senders and names across compose operations, downloads, and destructive-command confirmation.
 - `src/main.rs`: Clap argument-definition consistency and literal help text.
 - `tests/extraction.rs`: generated document fixtures for supported extraction formats.
 - `web/fetcher.test.js`: GraphiQL HTTP/SSE routing, cancellation, per-request headers, and failure propagation.
