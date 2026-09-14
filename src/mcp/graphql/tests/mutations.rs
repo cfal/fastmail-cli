@@ -145,19 +145,8 @@ async fn compose(
     response.data.into_json().unwrap()[field].clone()
 }
 
-#[tokio::test]
-async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
+async fn compose_server() -> MockServer {
     let server = mock_server(1).await;
-    let subject_of = |preview: &Value| {
-        preview["preview"]
-            .as_str()
-            .unwrap()
-            .lines()
-            .find_map(|line| line.strip_prefix("Subject: "))
-            .unwrap()
-            .to_string()
-    };
-    let mut reviewed_subjects = Vec::new();
     Mock::given(|req: &wiremock::Request| {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         body["methodCalls"].as_array().is_some_and(|calls| {
@@ -182,7 +171,10 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
                         {"id":"drafts", "name":"Drafts", "role":"drafts"}
                     ]}),
                     "Identity/get" => {
-                        json!({"list": [{"id":"id1", "name":"Me", "email":"me@example.com"}]})
+                        json!({"list": [
+                            {"id":"id1", "name":"Me", "email":"me@example.com"},
+                            {"id":"domain", "name":"Saved Name", "email":"*@example.com"}
+                        ]})
                     }
                     "Email/set" => json!({"created":{"email":{"id":"created"}}}),
                     "EmailSubmission/set" => json!({"created":{"submission":{"id":"submitted"}}}),
@@ -193,70 +185,202 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
             .collect();
         ResponseTemplate::new(200).set_body_json(json!({"methodResponses":responses}))
     })
-    .with_priority(1)
+    .with_priority(2)
     .mount(&server)
     .await;
+    server
+}
+
+#[tokio::test]
+async fn compose_pins_the_reviewed_default_when_identity_order_changes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     for field in ["sendEmail", "replyToEmail", "forwardEmail"] {
+        let server = compose_server().await;
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let counter = lookups.clone();
+        Mock::given(wiremock::matchers::body_string_contains("Identity/get"))
+            .respond_with(move |_: &wiremock::Request| {
+                let mut identities = vec![
+                    json!({"id":"id1", "name":"Me", "email":"me@example.com"}),
+                    json!({"id":"other", "name":"Other", "email":"other@example.com"}),
+                ];
+                if counter.fetch_add(1, Ordering::SeqCst) >= 2 {
+                    identities.reverse();
+                }
+                ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                    "Identity/get", {"list":identities}, "i0"
+                ]]}))
+            })
+            .with_priority(1)
+            .expect(3)
+            .mount(&server)
+            .await;
         let schema = build_schema();
         let client = client_for(&server);
-        let mut params = json!({"body":"approved body", "cc":"cc@example.com", "bcc":"bcc@example.com", "htmlBody":"<p>approved</p>"});
-        if field != "replyToEmail" {
-            params["to"] = json!("to@example.com");
-        }
+        let mut params = json!({"body":"Body"});
         if field == "sendEmail" {
-            params["subject"] = json!("approved subject");
+            params["subject"] = json!("Subject");
         } else {
             params["emailId"] = json!("e0");
         }
+        if field != "replyToEmail" {
+            params["to"] = json!("to@example.com");
+        }
         let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
-        reviewed_subjects.push(subject_of(&preview));
         assert!(
             preview["preview"]
                 .as_str()
                 .unwrap()
-                .contains("me@example.com")
+                .contains("From: Me <me@example.com>")
         );
-        let token = preview["confirmationToken"].as_str().unwrap();
-        let sent = compose(
-            &schema,
-            client.clone(),
-            field,
-            "CONFIRM",
-            &params,
-            Some(token),
-        )
-        .await;
-        assert_eq!(sent["success"], true, "{sent}");
-        let replay = compose(
-            &schema,
-            client.clone(),
-            field,
-            "CONFIRM",
-            &params,
-            Some(token),
-        )
-        .await;
-        assert_eq!(replay["success"], false);
-        let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
-        reviewed_subjects.push(subject_of(&preview));
-        let draft = compose(
+        let result = compose(
             &schema,
             client,
             field,
-            "DRAFT",
+            "CONFIRM",
             &params,
             preview["confirmationToken"].as_str(),
         )
         .await;
-        assert_eq!(draft["success"], true, "{draft}");
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(lookups.load(Ordering::SeqCst), 3);
+        let mut creates = 0;
+        for req in server.received_requests().await.unwrap() {
+            let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            for call in body["methodCalls"].as_array().into_iter().flatten() {
+                if call[0] == "Email/set" {
+                    creates += 1;
+                    assert_eq!(
+                        call[1]["create"]["email"]["from"],
+                        json!([{"email":"me@example.com", "name":"Me"}])
+                    );
+                }
+                if call[0] == "EmailSubmission/set" {
+                    assert_eq!(call[1]["create"]["submission"]["identityId"], "id1");
+                }
+            }
+        }
+        assert_eq!(creates, 1);
+    }
+}
+
+#[tokio::test]
+async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
+    let server = compose_server().await;
+    let subject_of = |preview: &Value| {
+        preview["preview"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("Subject: "))
+            .unwrap()
+            .to_string()
+    };
+    let mut reviewed_subjects = Vec::new();
+    let mut reviewed_senders = Vec::new();
+    let mut expected_identities = Vec::new();
+    for field in ["sendEmail", "replyToEmail", "forwardEmail"] {
+        for from in [None, Some("Fastmail-CLI Tester <new@example.com>")] {
+            let schema = build_schema();
+            let client = client_for(&server);
+            let mut params = json!({"body":"approved body", "cc":"cc@example.com", "bcc":"bcc@example.com", "htmlBody":"<p>approved</p>"});
+            if let Some(from) = from {
+                params["from"] = json!(from);
+            }
+            if field != "replyToEmail" {
+                params["to"] = json!("to@example.com");
+            }
+            if field == "sendEmail" {
+                params["subject"] = json!("approved subject");
+            } else {
+                params["emailId"] = json!("e0");
+            }
+            if from.is_some() {
+                let preview =
+                    compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+                let mut changed = params.clone();
+                changed["from"] = json!("Different Name <new@example.com>");
+                let rejected = compose(
+                    &schema,
+                    client.clone(),
+                    field,
+                    "CONFIRM",
+                    &changed,
+                    preview["confirmationToken"].as_str(),
+                )
+                .await;
+                assert_eq!(rejected["success"], false);
+                assert!(
+                    rejected["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Params changed")
+                );
+            }
+            let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+            reviewed_subjects.push(subject_of(&preview));
+            let expected_sender = from.unwrap_or("Me <me@example.com>");
+            assert!(
+                preview["preview"]
+                    .as_str()
+                    .unwrap()
+                    .lines()
+                    .any(|line| line == format!("From: {expected_sender}"))
+            );
+            reviewed_senders.push(expected_sender.to_string());
+            expected_identities.push(if from.is_some() { "domain" } else { "id1" });
+            let token = preview["confirmationToken"].as_str().unwrap();
+            let sent = compose(
+                &schema,
+                client.clone(),
+                field,
+                "CONFIRM",
+                &params,
+                Some(token),
+            )
+            .await;
+            assert_eq!(sent["success"], true, "{sent}");
+            let replay = compose(
+                &schema,
+                client.clone(),
+                field,
+                "CONFIRM",
+                &params,
+                Some(token),
+            )
+            .await;
+            assert_eq!(replay["success"], false);
+            let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+            reviewed_subjects.push(subject_of(&preview));
+            reviewed_senders.push(expected_sender.to_string());
+            let draft = compose(
+                &schema,
+                client,
+                field,
+                "DRAFT",
+                &params,
+                preview["confirmationToken"].as_str(),
+            )
+            .await;
+            assert_eq!(draft["success"], true, "{draft}");
+        }
     }
     let mut submissions = 0;
     let mut creates = 0;
     let mut submitted_subjects = Vec::new();
+    let mut submitted_senders = Vec::new();
+    let mut submitted_identities = Vec::new();
     for req in server.received_requests().await.unwrap() {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         for call in body["methodCalls"].as_array().into_iter().flatten() {
             if call[0] == "EmailSubmission/set" {
+                submitted_identities.push(
+                    call[1]["create"]["submission"]["identityId"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                );
                 assert_eq!(
                     call[1]["onSuccessUpdateEmail"]["#submission"]["mailboxIds"],
                     json!({"sent":true})
@@ -277,7 +401,10 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
             assert_eq!(email["keywords"]["$draft"], true);
             assert_eq!(email["cc"][0]["email"], "cc@example.com");
             assert_eq!(email["bcc"][0]["email"], "bcc@example.com");
-            assert_eq!(email["from"][0]["email"], "me@example.com");
+            let from: Vec<crate::models::EmailAddress> =
+                serde_json::from_value(email["from"].clone()).unwrap();
+            assert_eq!(from.len(), 1);
+            submitted_senders.push(from[0].to_string());
             assert!(
                 email["bodyValues"]["textBody"]["value"]
                     .as_str()
@@ -287,9 +414,11 @@ async fn unchanged_compose_confirmation_sends_reviewed_payload_once() {
             assert_eq!(email["bodyValues"]["htmlBody"]["value"], "<p>approved</p>");
         }
     }
-    assert_eq!(creates, 6);
-    assert_eq!(submissions, 3);
+    assert_eq!(creates, 12);
+    assert_eq!(submissions, 6);
     assert_eq!(submitted_subjects, reviewed_subjects);
+    assert_eq!(submitted_senders, reviewed_senders);
+    assert_eq!(submitted_identities, expected_identities);
 }
 
 #[tokio::test]
