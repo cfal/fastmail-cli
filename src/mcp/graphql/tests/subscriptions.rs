@@ -37,7 +37,7 @@ async fn subscription_does_not_retain_lazy_records_between_events() {
         .with_priority(1).mount(&server).await;
     let schema = build_schema();
     let req = request(
-        "subscription { emails(pollSeconds: 1) { id textBody } }",
+        "subscription { emails(pollSeconds: 1) { id textBody readableBody { format content } } }",
         client_for(&server),
         CardDavCreds::default(),
     );
@@ -48,9 +48,11 @@ async fn subscription_does_not_retain_lazy_records_between_events() {
             .unwrap()
             .unwrap();
         assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().unwrap();
+        assert_eq!(data["emails"]["textBody"], "Body of e0");
         assert_eq!(
-            response.data.into_json().unwrap()["emails"]["textBody"],
-            "Body of e0"
+            data["emails"]["readableBody"],
+            json!({"format":"text","content":"Body of e0"})
         );
     }
     let detail_gets = calls(&server)

@@ -21,7 +21,8 @@ use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Blobs, Emails, Mailboxes, Threads, to_gql_error};
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
 use crate::models::{
-    Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights, MaskedEmail, Session,
+    BodyPreference, Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights,
+    MaskedEmail, ReadableBody, ReadableBodyFormat, ReadableBodySource, Session,
 };
 
 /// Page size used when a connection field names no `first`/`last`.
@@ -34,6 +35,77 @@ pub(crate) fn clamp_page(size: Option<u32>) -> u32 {
 }
 
 // ============ Output Types ============
+
+/// Reading preference; source HTML and JMAP body fields remain unchanged.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(name = "BodyFormat")]
+pub enum GqlBodyFormat {
+    /// Prefer genuine plain text, converting HTML-only parts to Markdown.
+    Auto,
+    /// Prefer the HTML alternative and convert it to Markdown.
+    Markdown,
+    /// Prefer genuine plain text, converting HTML-only parts to plain text.
+    Text,
+}
+
+impl From<GqlBodyFormat> for BodyPreference {
+    fn from(format: GqlBodyFormat) -> Self {
+        match format {
+            GqlBodyFormat::Auto => Self::Auto,
+            GqlBodyFormat::Markdown => Self::Markdown,
+            GqlBodyFormat::Text => Self::Text,
+        }
+    }
+}
+
+#[Object(name = "ReadableBodySource")]
+impl ReadableBodySource {
+    async fn part_id(&self) -> Option<&str> {
+        self.part_id.as_deref()
+    }
+
+    async fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+}
+
+/// Best-effort derived content, not a sanitized or authoritative replacement for the message.
+#[Object(name = "ReadableBody")]
+impl ReadableBody {
+    /// Actual content format: `text` or `markdown`.
+    async fn format(&self) -> &str {
+        match self.format {
+            ReadableBodyFormat::Text => "text",
+            ReadableBodyFormat::Markdown => "markdown",
+        }
+    }
+
+    async fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// Selected JMAP body parts, in order. Alternative representations are not concatenated.
+    async fn source_parts(&self) -> &[ReadableBodySource] {
+        &self.source_parts
+    }
+
+    /// A selected JMAP value or the derived view was truncated.
+    async fn is_truncated(&self) -> bool {
+        self.is_truncated
+    }
+
+    async fn is_encoding_problem(&self) -> bool {
+        self.is_encoding_problem
+    }
+
+    /// Missing parts, omitted images, conversion failures, or other fidelity limitations.
+    async fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+// Bound concurrent CPU/memory work without blocking Tokio's request workers.
+static BODY_CONVERSIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// The account's mailboxes, through the loader. Every mailbox question is
 /// answered by filtering this one list, so a query touching mailboxes at ten
@@ -289,7 +361,7 @@ pub(crate) fn attachments_of(email: &Email) -> Vec<GqlAttachment> {
 /// An email.
 ///
 /// Lists (`emails`, `searchEmails`, `Mailbox.emails`) return these carrying only
-/// the cheap header fields. Selecting `textBody`, `htmlBody`, `attachments` or
+/// the cheap header fields. Selecting `readableBody`, `textBody`, `htmlBody`, `attachments` or
 /// the threading headers triggers a batched fetch of the full record for every
 /// email in the list at once — one extra API call, not one per email.
 pub struct GqlEmail {
@@ -426,18 +498,37 @@ impl GqlEmail {
             .collect())
     }
 
-    /// Plain text body content. Lazily fetched — selecting it on a list of
-    /// emails costs one batched call for the whole list.
+    /// Raw JMAP text-preferred body content, which can contain HTML. Use
+    /// `readableBody` for reading. Lazily fetched in one batched call per list.
     async fn text_body(&self, ctx: &Context<'_>) -> Result<Option<String>> {
         let email = self.detail(ctx).await?;
         Ok(email.text_content())
     }
 
-    /// HTML body content. Lazily fetched — selecting it on a list of emails
-    /// costs one batched call for the whole list.
+    /// Raw JMAP HTML-preferred body content, which can contain plain text.
+    /// Lazily fetched in one batched call per list.
     async fn html_body(&self, ctx: &Context<'_>) -> Result<Option<String>> {
         let email = self.detail(ctx).await?;
         Ok(email.html_content())
+    }
+
+    /// Readable text or Markdown, with source metadata and fidelity warnings.
+    /// No resource fetching or script execution. Lazily shares the body fetch.
+    #[graphql(complexity = "child_complexity.saturating_add(50).min(super::MAX_COMPLEXITY + 1)")]
+    async fn readable_body(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(default_with = "GqlBodyFormat::Auto")] format: GqlBodyFormat,
+    ) -> Result<Option<ReadableBody>> {
+        let email = self.detail(ctx).await?;
+        let permit = BODY_CONVERSIONS.acquire().await?;
+        let email = email.into_owned();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            email.readable_body(format.into())
+        })
+        .await
+        .map_err(|_| async_graphql::Error::new("Readable body conversion failed"))
     }
 
     /// Attachments with metadata. Lazily fetched. Select `content` on an
