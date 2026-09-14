@@ -144,24 +144,15 @@ fn create_private_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(contents)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     file.write_all(contents)?;
     Ok(())
 }
@@ -169,6 +160,23 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_file_creation_is_exclusive_and_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_private_file(&path, b"original").unwrap();
+        assert!(write_private_file(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[test]
     fn test_config_default() {
