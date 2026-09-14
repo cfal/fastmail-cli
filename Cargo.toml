@@ -60,6 +60,6 @@ wiremock = "0.6"
 zip = { version = "8.6", default-features = false }
 
 [profile.release]
+opt-level = 3
+lto = "fat"
 strip = true
-lto = "thin"
-codegen-units = 16
