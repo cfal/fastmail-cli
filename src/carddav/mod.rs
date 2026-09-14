@@ -124,6 +124,7 @@ impl CardDavClient {
         Self::try_new(username, app_password).expect("Failed to build CardDAV client")
     }
 
+    /// Use each client within one Tokio runtime.
     pub fn try_new(username: String, app_password: String) -> Result<Self> {
         Ok(Self {
             client: crate::util::http_client()?,

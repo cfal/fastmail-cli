@@ -623,6 +623,7 @@ impl JmapClient {
         Self::try_new(token).expect("Failed to build HTTP client")
     }
 
+    /// Use each client within one Tokio runtime.
     pub fn try_new(token: String) -> Result<Self> {
         Ok(Self {
             client: crate::util::http_client()?,

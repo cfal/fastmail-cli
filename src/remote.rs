@@ -16,6 +16,7 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
+    /// Use each client within one Tokio runtime.
     pub fn new(url: &str, username: Option<&str>, password: Option<&str>) -> Result<Self> {
         let invalid = || {
             Error::Config(

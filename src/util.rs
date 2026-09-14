@@ -2,18 +2,49 @@ use crate::jmap::AttachmentData;
 use crate::models::EmailAddress;
 use std::path::Path;
 
-pub(crate) fn http_client() -> crate::error::Result<reqwest::Client> {
-    static CLIENT: std::sync::LazyLock<Result<reqwest::Client, reqwest::Error>> =
-        std::sync::LazyLock::new(|| {
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-        });
-    CLIENT
-        .as_ref()
-        .cloned()
+struct RuntimeHttpClient {
+    runtime: tokio::runtime::Id,
+    client: reqwest::Client,
+    lifetime: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for RuntimeHttpClient {
+    fn drop(&mut self) {
+        self.lifetime.abort();
+    }
+}
+
+fn build_http_client() -> crate::error::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
         .map_err(|e| crate::error::Error::Config(format!("Failed to initialize HTTP client: {e}")))
+}
+
+pub(crate) fn http_client() -> crate::error::Result<reqwest::Client> {
+    // Hyper dispatchers belong to the runtime that opened each connection.
+    // One cache slot keeps reuse bounded without sharing across runtimes.
+    static CACHED: std::sync::Mutex<Option<RuntimeHttpClient>> = std::sync::Mutex::new(None);
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return build_http_client();
+    };
+    let mut cached = CACHED.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(entry) = cached.as_ref()
+        && entry.runtime == runtime.id()
+        && !entry.lifetime.is_finished()
+    {
+        return Ok(entry.client.clone());
+    }
+    let client = build_http_client()?;
+    *cached = Some(RuntimeHttpClient {
+        runtime: runtime.id(),
+        client: client.clone(),
+        // Runtime IDs may be recycled after shutdown; the task detects that
+        // shutdown even when a new runtime receives the same ID.
+        lifetime: runtime.spawn(std::future::pending()),
+    });
+    Ok(client)
 }
 
 pub fn parse_addresses(input: &str) -> Vec<EmailAddress> {
@@ -461,6 +492,76 @@ pub fn resolve_html(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_connections_are_reused_within_but_not_between_runtimes() {
+        use axum::{Router, extract::ConnectInfo, routing::get};
+        use std::net::SocketAddr;
+        use tokio::runtime::Builder;
+
+        async fn peer(client: &reqwest::Client, url: &str) -> String {
+            client
+                .get(url)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        }
+
+        let server_runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let url = server_runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let router = Router::new().route(
+                "/",
+                get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move { peer.to_string() }),
+            );
+            tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .unwrap();
+            });
+            format!("http://127.0.0.1:{port}/")
+        });
+        // Keep A running while B sends, so an incorrectly shared dispatcher
+        // responds rather than stalling on an undriven current-thread runtime.
+        let runtime_a = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (client_a, peer_a) = runtime_a.block_on(async {
+            let client = http_client().unwrap();
+            let first = peer(&client, &url).await;
+            assert_eq!(peer(&client, &url).await, first);
+            (client, first)
+        });
+        let runtime_b = Builder::new_current_thread().enable_all().build().unwrap();
+        let (client_b, peer_b) = runtime_b.block_on(async {
+            let client = http_client().unwrap();
+            let address = peer(&client, &url).await;
+            (client, address)
+        });
+        assert_ne!(
+            peer_a, peer_b,
+            "Independent runtimes must not share a connection"
+        );
+        drop(runtime_a);
+        drop(client_a);
+        runtime_b.block_on(async {
+            assert_eq!(peer(&client_b, &url).await, peer_b);
+        });
+    }
 
     #[test]
     fn size_limits_reject_invalid_or_nonpositive_values() {
