@@ -339,30 +339,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_email_address_display_with_name() {
-        let addr = EmailAddress {
-            name: Some("John Doe".to_string()),
-            email: "john@example.com".to_string(),
-        };
-        assert_eq!(format!("{}", addr), "John Doe <john@example.com>");
-    }
-
-    #[test]
-    fn test_email_address_display_without_name() {
-        let addr = EmailAddress {
-            name: None,
-            email: "john@example.com".to_string(),
-        };
-        assert_eq!(format!("{}", addr), "john@example.com");
-    }
-
-    #[test]
-    fn test_email_address_display_empty_name() {
-        let addr = EmailAddress {
-            name: Some("".to_string()),
-            email: "john@example.com".to_string(),
-        };
-        assert_eq!(format!("{}", addr), "john@example.com");
+    fn email_address_display_omits_absent_or_empty_names() {
+        for (name, expected) in [
+            (Some("John Doe"), "John Doe <john@example.com>"),
+            (None, "john@example.com"),
+            (Some(""), "john@example.com"),
+        ] {
+            let addr = EmailAddress {
+                name: name.map(str::to_owned),
+                email: "john@example.com".to_string(),
+            };
+            assert_eq!(addr.to_string(), expected);
+        }
     }
 
     fn body_part(part_id: &str) -> EmailBodyPart {
@@ -387,16 +375,17 @@ mod tests {
     }
 
     #[test]
-    fn text_content_joins_every_part() {
-        // A multipart message carries several text parts; taking only the first
-        // silently dropped the rest.
+    fn text_and_html_content_join_their_own_parts_in_order() {
         let email = Email {
             id: "e1".to_string(),
             text_body: Some(vec![body_part("1"), body_part("2"), body_part("3")]),
+            html_body: Some(vec![body_part("html2"), body_part("html1")]),
             body_values: Some(HashMap::from([
                 ("1".to_string(), body_value("first")),
                 ("2".to_string(), body_value("second")),
                 ("3".to_string(), body_value("third")),
+                ("html1".to_string(), body_value("<p>first</p>")),
+                ("html2".to_string(), body_value("<p>second</p>")),
             ])),
             ..Default::default()
         };
@@ -404,69 +393,96 @@ mod tests {
             email.text_content().as_deref(),
             Some("first\nsecond\nthird")
         );
+        assert_eq!(
+            email.html_content().as_deref(),
+            Some("<p>second</p>\n<p>first</p>")
+        );
     }
 
     #[test]
-    fn body_content_is_none_when_there_are_no_parts() {
-        let email = Email {
-            id: "e1".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(email.text_content(), None);
-        assert_eq!(email.html_content(), None);
+    fn body_content_is_none_without_resolvable_parts() {
+        for parts in [None, Some(vec![]), Some(vec![body_part("missing")])] {
+            for values in [None, Some(HashMap::new())] {
+                let email = Email {
+                    text_body: parts.clone(),
+                    html_body: parts.clone(),
+                    body_values: values,
+                    ..Default::default()
+                };
+                assert_eq!(email.text_content(), None);
+                assert_eq!(email.html_content(), None);
+            }
+        }
     }
 
     #[test]
     fn body_parts_without_a_matching_value_are_skipped() {
         let email = Email {
             id: "e1".to_string(),
-            text_body: Some(vec![body_part("1"), body_part("missing")]),
+            text_body: Some(vec![
+                body_part("1"),
+                body_part("missing"),
+                EmailBodyPart {
+                    part_id: None,
+                    ..body_part("no-id")
+                },
+            ]),
             body_values: Some(HashMap::from([("1".to_string(), body_value("only"))])),
             ..Default::default()
         };
         assert_eq!(email.text_content().as_deref(), Some("only"));
+        assert_eq!(email.html_content(), None);
     }
 
     #[test]
-    fn test_email_is_unread() {
-        let mut email = Email {
-            id: "test".to_string(),
+    fn an_empty_body_value_is_content_not_a_missing_body() {
+        let email = Email {
+            text_body: Some(vec![body_part("1")]),
+            body_values: Some(HashMap::from([("1".into(), body_value(""))])),
             ..Default::default()
         };
+        assert_eq!(email.text_content().as_deref(), Some(""));
+        assert_eq!(email.html_content(), None);
+    }
+
+    #[test]
+    fn keyword_predicates_use_presence_including_drafts() {
+        let mut email = Email::default();
         assert!(email.is_unread());
-        email.keywords.insert("$seen".to_string(), true);
-        assert!(!email.is_unread());
-    }
-
-    #[test]
-    fn test_email_is_flagged() {
-        let mut email = Email {
-            id: "test".to_string(),
-            ..Default::default()
-        };
         assert!(!email.is_flagged());
-        email.keywords.insert("$flagged".to_string(), true);
-        assert!(email.is_flagged());
+        assert!(!email.is_draft());
+        for value in [true, false] {
+            for keyword in ["$seen", "$flagged", "$draft"] {
+                email.keywords.insert(keyword.into(), value);
+            }
+            assert!(!email.is_unread());
+            assert!(email.is_flagged());
+            assert!(email.is_draft());
+        }
     }
 
     #[test]
-    fn test_output_success() {
-        let output: Output<&str> = Output::success("test data");
-        assert!(output.success);
-        assert_eq!(output.data, Some("test data"));
-        assert!(output.error.is_none());
+    fn output_envelopes_serialize_only_the_fields_for_their_state() {
+        for (output, expected) in [
+            (
+                Output::success("test data"),
+                r#"{"success":true,"data":"test data"}"#,
+            ),
+            (
+                Output::success_msg("done"),
+                r#"{"success":true,"message":"done"}"#,
+            ),
+            (
+                Output::error("something broke"),
+                r#"{"success":false,"error":"something broke"}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&output).unwrap(), expected);
+        }
     }
 
     #[test]
-    fn test_output_error() {
-        let output: Output<()> = Output::error("something broke");
-        assert!(!output.success);
-        assert!(output.data.is_none());
-        assert_eq!(output.error, Some("something broke".to_string()));
-    }
-
-    #[test]
-    fn test_session_deserialize() {
+    fn session_deserialization_preserves_primary_account_lookup() {
         let json = r#"{
             "capabilities": {},
             "accounts": {},
@@ -476,13 +492,15 @@ mod tests {
             "downloadUrl": "https://api.example.com/download",
             "uploadUrl": "https://api.example.com/upload"
         }"#;
-        let session: Session = serde_json::from_str(json).unwrap();
+        let mut session: Session = serde_json::from_str(json).unwrap();
         assert_eq!(session.username, "test@example.com");
         assert_eq!(session.primary_account_id(), Some("acc1"));
+        session.primary_accounts.clear();
+        assert_eq!(session.primary_account_id(), None);
     }
 
     #[test]
-    fn test_mailbox_deserialize() {
+    fn mailbox_deserialization_reads_camel_case_counts() {
         let json = r#"{
             "id": "mb1",
             "name": "Inbox",
@@ -499,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn test_masked_email_deserialize() {
+    fn masked_email_deserialization_preserves_optional_metadata() {
         let json = r#"{
             "id": "me123",
             "email": "abc123@mask.fastmail.com",

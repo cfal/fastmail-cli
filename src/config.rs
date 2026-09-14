@@ -179,9 +179,13 @@ mod tests {
     }
 
     #[test]
-    fn test_config_default() {
-        let config = Config::default();
-        assert!(config.core.api_token.is_none());
+    fn missing_sections_default_to_absent_credentials() {
+        for source in ["", "[core]", "[contacts]"] {
+            let config = Config::parse(source).unwrap();
+            assert!(config.core.api_token.is_none());
+            assert!(config.contacts.username.is_none());
+            assert!(config.contacts.app_password.is_none());
+        }
     }
 
     #[test]
@@ -191,46 +195,40 @@ mod tests {
             "core = \"secret-token\"",
         ] {
             let error = Config::parse(content).unwrap_err().to_string();
+            assert_eq!(
+                error,
+                "Config error: Invalid config.toml: check TOML syntax and field types."
+            );
             assert!(!error.contains("secret-token"));
         }
     }
 
     #[test]
-    fn test_config_get_token_none() {
-        // Test the config-only path by calling the inner logic directly
-        let config = Config::default();
-        // When env var is not set, falls back to config — which has no token
-        assert!(config.core.api_token.is_none());
-    }
-
-    #[test]
-    fn test_config_get_token_some() {
-        let config = Config {
-            core: CoreConfig {
-                api_token: Some("test-token".to_string()),
-            },
-            ..Default::default()
-        };
-        assert_eq!(config.core.api_token.as_deref(), Some("test-token"));
-    }
-
-    #[test]
-    fn test_config_set_token() {
+    fn set_token_replaces_the_previous_value() {
         let mut config = Config::default();
+        config.set_token("old-token".to_string());
         config.set_token("new-token".to_string());
         assert_eq!(config.core.api_token, Some("new-token".to_string()));
     }
 
     #[test]
-    fn test_config_serialize_deserialize() {
+    fn all_credentials_roundtrip_through_toml() {
         let config = Config {
             core: CoreConfig {
                 api_token: Some("test-token".to_string()),
             },
-            ..Default::default()
+            contacts: ContactsConfig {
+                username: Some("test@example.com".into()),
+                app_password: Some("app-password".into()),
+            },
         };
         let toml_str = toml::to_string(&config).unwrap();
         let deserialized: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(deserialized.core.api_token, Some("test-token".to_string()));
+        assert_eq!(deserialized.contacts.username, config.contacts.username);
+        assert_eq!(
+            deserialized.contacts.app_password,
+            config.contacts.app_password
+        );
     }
 }
