@@ -129,7 +129,15 @@ async fn unsupported_images_are_reported_without_losing_other_downloads() {
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "Partial downloads retain the documented zero exit status"
+    );
     assert_eq!(result["success"], false);
+    assert_eq!(
+        result["error"],
+        "Some images could not be resized; see data.skipped"
+    );
     assert_eq!(result["data"]["skipped"].as_array().unwrap().len(), 2);
     assert_eq!(result["data"]["files"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -138,6 +146,120 @@ async fn unsupported_images_are_reported_without_losing_other_downloads() {
     );
     assert!(!home.path().join("scan.tiff").exists());
     assert!(!home.path().join("corrupt.png").exists());
+}
+
+#[tokio::test]
+async fn colliding_download_names_preserve_existing_and_new_files() {
+    use wiremock::matchers::query_param;
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/cli/v1/jmap"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/get", {"list":[{"id":"e1","attachments":[
+                    {"blobId":"first","name":"../notes.txt","type":"text/plain"},
+                    {"blobId":"second","name":"notes.txt","type":"text/plain"}
+                ]}]}, "g0"
+            ]]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    for blob in ["first", "second"] {
+        Mock::given(method("GET"))
+            .and(path("/cli/v1/download"))
+            .and(query_param("blob_id", blob))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(blob.as_bytes()))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("attachments");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("notes.txt"), b"existing").unwrap();
+    let output = command(&server, home.path())
+        .args(["download", "e1", "--output", destination.to_str().unwrap()])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result,
+        json!({"success":true, "data":{"files":[
+            destination.join("notes-2.txt"), destination.join("notes-3.txt")
+        ]}})
+    );
+    assert_eq!(
+        std::fs::read(destination.join("notes.txt")).unwrap(),
+        b"existing"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("notes-2.txt")).unwrap(),
+        b"first"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("notes-3.txt")).unwrap(),
+        b"second"
+    );
+    assert!(!home.path().join("notes.txt").exists());
+}
+
+#[tokio::test]
+async fn json_download_extracts_text_without_creating_attachment_files() {
+    let server = server().await;
+    let home = tempfile::tempdir().unwrap();
+    let output = command(&server, home.path())
+        .args([
+            "download",
+            "e1",
+            "--format",
+            "json",
+            "--output",
+            home.path().to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result,
+        json!({"success":true, "data":[{
+            "filename":"notes.txt", "content_type":"text/plain", "size":10, "text":"attachment"
+        }]})
+    );
+    assert!(!home.path().join("notes.txt").exists());
+}
+
+#[tokio::test]
+async fn destructive_commands_require_confirmation_before_network_access() {
+    let server = server().await;
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["spam", "e1"],
+        vec!["masked", "delete", "mask1"],
+        vec!["contacts", "delete", "contact1"],
+    ] {
+        let output = command(&server, home.path())
+            .args(&args)
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("Use -y to confirm"),
+            "{args:?}"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
