@@ -509,6 +509,28 @@ mod tests {
         use std::net::SocketAddr;
         use tokio::runtime::Builder;
 
+        // Other tests legitimately evict the single-slot cache from their runtimes.
+        // Isolate this test so it can assert cache hits as well as connection pooling.
+        if std::env::var_os("FASTMAIL_HTTP_CACHE_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "util::tests::http_connections_are_reused_within_but_not_between_runtimes",
+                    "--nocapture",
+                ])
+                .env("FASTMAIL_HTTP_CACHE_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test\n"));
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         async fn peer(client: &reqwest::Client, url: &str) -> String {
             client
                 .get(url)
@@ -554,6 +576,12 @@ mod tests {
             let client = http_client().unwrap();
             let first = peer(&client, &url).await;
             assert_eq!(peer(&client, &url).await, first);
+            let cached = http_client().unwrap();
+            assert_eq!(
+                peer(&cached, &url).await,
+                first,
+                "Cache hit must reuse the pool"
+            );
             (client, first)
         });
         let runtime_b = Builder::new_current_thread().enable_all().build().unwrap();
@@ -571,6 +599,36 @@ mod tests {
         runtime_b.block_on(async {
             assert_eq!(peer(&client_b, &url).await, peer_b);
         });
+    }
+
+    #[test]
+    fn runtime_lifetime_marker_finishes_on_shutdown_and_cache_eviction() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let entry = RuntimeHttpClient {
+            runtime: runtime.handle().id(),
+            client: build_http_client().unwrap(),
+            lifetime: runtime.spawn(std::future::pending()),
+        };
+        assert!(!entry.lifetime.is_finished());
+        drop(runtime);
+        assert!(entry.lifetime.is_finished());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let entry = RuntimeHttpClient {
+            runtime: runtime.handle().id(),
+            client: build_http_client().unwrap(),
+            lifetime: runtime.spawn(std::future::pending()),
+        };
+        let marker = entry.lifetime.abort_handle();
+        drop(entry);
+        runtime.block_on(tokio::task::yield_now());
+        assert!(marker.is_finished());
     }
 
     #[test]

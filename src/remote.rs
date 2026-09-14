@@ -8,6 +8,11 @@ tokio::task_local! {
     static SERVER: Option<HttpServer>;
 }
 
+/// HTTP proxy client with a runtime-bound connection pool.
+///
+/// Keep a client and all its clones on the Tokio runtime where it was constructed.
+/// A client constructed outside a runtime must be used on only one runtime.
+/// For multiple runtimes, construct separate clients inside each runtime.
 #[derive(Clone)]
 pub struct HttpServer {
     base: Url,

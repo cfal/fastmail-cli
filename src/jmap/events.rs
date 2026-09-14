@@ -200,4 +200,24 @@ mod tests {
         assert_eq!(events[0].id.as_deref(), Some("caf\u{e9}"));
         assert_eq!(events[0].data, "hi");
     }
+
+    #[test]
+    fn event_ids_reset_on_empty_values_but_ignore_nul_bytes() {
+        let mut parser = EventParser::default();
+        let events = parser
+            .feed("id: first\nid: invalid\0value\ndata: one\n\nid\ndata: two\n\n")
+            .unwrap();
+        assert_eq!(events[0].id.as_deref(), Some("first"));
+        assert_eq!(events[1].id.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn malformed_utf8_is_replaced_without_losing_the_next_frame() {
+        let mut parser = EventParser::default();
+        let events = parser
+            .feed_bytes(b"data: a\xffb\n\ndata: next\n\n")
+            .unwrap();
+        assert_eq!(events[0].data, "a\u{fffd}b");
+        assert_eq!(events[1].data, "next");
+    }
 }

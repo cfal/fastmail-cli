@@ -18,6 +18,7 @@ use tracing::debug;
 /// The lock is held only across individual JMAP calls, never across a read of
 /// the push channel — that read blocks until mail arrives, which on a quiet
 /// account is hours.
+/// All holders must use the client on the same Tokio runtime; see [`JmapClient`].
 pub type SharedJmapClient = std::sync::Arc<tokio::sync::Mutex<JmapClient>>;
 
 /// How often to ask the server for a keep-alive, and the basis for the read
@@ -325,13 +326,13 @@ mod tests {
         }
     }
 
-    async fn arrivals_server() -> MockServer {
+    async fn arrivals_server(created: &[&str]) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(body_string_contains("Email/changes"))
             .and(body_string_contains(r#""sinceState":"s0""#))
             .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", json!({
-                "newState": "s1", "created": ["e1"], "updated": [], "destroyed": [], "hasMoreChanges": false
+                "newState": "s1", "created": created, "updated": [], "destroyed": [], "hasMoreChanges": false
             }))))
             .mount(&server).await;
         Mock::given(method("POST"))
@@ -339,7 +340,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
                 "Email/get",
                 json!({
-                    "state": "s1", "list": [{"id":"e1"}], "notFound": []
+                    "state": "s1", "list": created.iter().map(|id| json!({"id":id})).collect::<Vec<_>>(), "notFound": []
                 }),
             )))
             .mount(&server)
@@ -350,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn failed_detail_fetch_preserves_cursor_and_retries_without_a_push() {
         for full in [true, false] {
-            let server = arrivals_server().await;
+            let server = arrivals_server(&["e1"]).await;
             Mock::given(method("POST"))
                 .and(body_string_contains("Email/get"))
                 .respond_with(ResponseTemplate::new(503))
@@ -379,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_push_frame_reconciles_instead_of_ending_watch() {
-        let server = arrivals_server().await;
+        let server = arrivals_server(&["e1"]).await;
         Mock::given(method("GET"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -402,15 +403,259 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_poll_is_rejected_before_network_access() {
-        let client = std::sync::Arc::new(tokio::sync::Mutex::new(
-            JmapClient::try_new("test".into()).unwrap(),
-        ));
-        assert!(
-            ArrivalWatcher::new(client, None, false, Some(Duration::ZERO))
-                .await
-                .is_err()
-        );
+    async fn empty_changes_advance_the_cursor_without_fetching_details() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("Email/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Email/changes",
+                json!({"newState":"s1", "created":[], "updated":["old"], "destroyed":["gone"], "hasMoreChanges":false}),
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut watcher = watcher(mock_client(&server.uri()), true);
+        let arrivals = watcher.drain().await.unwrap();
+        assert!(arrivals.emails.is_empty());
+        assert!(!arrivals.resynced);
+        assert_eq!(watcher.state, "s1");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn arrivals_are_filtered_and_sorted_for_full_and_summary_fetches() {
+        for full in [true, false] {
+            let server = arrivals_server(&["late", "other", "early"]).await;
+            Mock::given(method("POST"))
+                .and(body_string_contains("Email/get"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                    "Email/get",
+                    json!({"list":[
+                        {"id":"late", "mailboxIds":{"inbox":true}, "receivedAt":"2024-01-03T00:00:00Z"},
+                        {"id":"other", "mailboxIds":{"archive":true}, "receivedAt":"2024-01-01T00:00:00Z"},
+                        {"id":"early", "mailboxIds":{"inbox":true}, "receivedAt":"2024-01-02T00:00:00Z"}
+                    ], "notFound": []}),
+                )))
+                .with_priority(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut watcher = watcher(mock_client(&server.uri()), full);
+            watcher.mailbox_id = Some("inbox".into());
+            let arrivals = watcher.drain().await.unwrap();
+            assert_eq!(
+                arrivals
+                    .emails
+                    .iter()
+                    .map(|e| e.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["early", "late"]
+            );
+            assert_eq!(watcher.state, "s1");
+            assert!(!arrivals.resynced);
+            let requests = server.received_requests().await.unwrap();
+            let fetched: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+            let args = &fetched["methodCalls"][0][1];
+            assert_eq!(args["ids"], json!(["late", "other", "early"]));
+            assert_eq!(args["fetchTextBodyValues"], full);
+            assert_eq!(args["fetchHTMLBodyValues"], full);
+            assert_eq!(
+                args["properties"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("textBody")),
+                full
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn history_resync_commits_only_after_fetching_the_current_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("Email/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "error",
+                json!({"type":"cannotCalculateChanges"}),
+            )))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("Email/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Email/get",
+                json!({"state":"present", "list":[]}),
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("Email/get"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut watcher = watcher(mock_client(&server.uri()), false);
+        watcher.retry_pending = true;
+        watcher.retry_backoff = 0;
+        let failed = watcher.next_arrivals().await.unwrap();
+        assert!(failed.emails.is_empty());
+        assert!(!failed.resynced);
+        assert!(watcher.retry_pending);
+        assert_eq!(watcher.state, "s0");
+
+        let recovered = watcher.next_arrivals().await.unwrap();
+        assert!(recovered.emails.is_empty());
+        assert!(recovered.resynced);
+        assert_eq!(watcher.state, "present");
+        assert!(!watcher.retry_pending);
+        assert_eq!(watcher.retry_backoff, BACKOFF_START);
+        for request in server.received_requests().await.unwrap() {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let call = &body["methodCalls"][0];
+            if call[0] == "Email/get" {
+                assert_eq!(call[1]["ids"], json!([]), "Resync must not replay old mail");
+            } else {
+                assert_eq!(call[1]["sinceState"], "s0");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn authentication_failures_end_watch_during_push_or_reconciliation() {
+        for push in [true, false] {
+            let server = MockServer::start().await;
+            Mock::given(method(if push { "GET" } else { "POST" }))
+                .respond_with(ResponseTemplate::new(401))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut client = mock_client(&server.uri());
+            client.session.as_mut().unwrap().event_source_url = Some(server.uri());
+            let mut watcher = watcher(client, false);
+            watcher.wake = Wake::Push {
+                stream: None,
+                parser: EventParser::default(),
+                backoff: 1,
+                last_event_id: None,
+            };
+            watcher.retry_pending = !push;
+            watcher.retry_backoff = 0;
+            assert!(matches!(
+                watcher.next_arrivals().await,
+                Err(Error::InvalidToken(_))
+            ));
+            assert_eq!(watcher.state, "s0");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn push_reconnect_preserves_event_ids_and_ignores_keepalives() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("id: change-id\ndata: {}\n\n", "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "id: ping-id\nevent: ping\ndata: keepalive\n\n",
+                "text/event-stream",
+            ))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut client = mock_client(&server.uri());
+        client.session.as_mut().unwrap().event_source_url = Some(server.uri());
+        let mut watcher = watcher(client, false);
+        watcher.wake = Wake::Push {
+            stream: None,
+            parser: EventParser::default(),
+            backoff: 1,
+            last_event_id: None,
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            watcher.wait_for_push().await.unwrap();
+            assert!(matches!(&watcher.wake, Wake::Push { stream: None, last_event_id: Some(id), .. } if id == "ping-id"));
+            watcher.wait_for_push().await.unwrap();
+            assert!(matches!(&watcher.wake, Wake::Push { stream: Some(_), last_event_id: Some(id), .. } if id == "change-id"));
+        }).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests[0].headers.contains_key("last-event-id"));
+        assert_eq!(requests[1].headers["last-event-id"], "ping-id");
+    }
+
+    #[tokio::test]
+    async fn invalid_poll_intervals_are_rejected_before_network_access() {
+        let server = MockServer::start().await;
+        let client = std::sync::Arc::new(tokio::sync::Mutex::new(mock_client(&server.uri())));
+        for interval in [Duration::ZERO, Duration::from_millis(999), Duration::MAX] {
+            let result = ArrivalWatcher::new(client.clone(), None, false, Some(interval)).await;
+            assert!(
+                matches!(result, Err(Error::Config(message)) if message == "Polling interval must be at least one second and fit the system clock")
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn watching_starts_at_the_present_state_after_resolving_the_mailbox() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(|request: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let call = &body["methodCalls"][0];
+                let response = match call[0].as_str().unwrap() {
+                    "Mailbox/get" => jmap_response(
+                        "Mailbox/get",
+                        json!({"list":[{"id":"mb1", "name":"Inbox", "role":"inbox"}]}),
+                    ),
+                    "Email/get" => {
+                        assert_eq!(call[1]["ids"], json!([]));
+                        jmap_response("Email/get", json!({"state":"present", "list":[]}))
+                    }
+                    method => panic!("Unexpected {method} during watcher initialization"),
+                };
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&server)
+            .await;
+        let client = std::sync::Arc::new(tokio::sync::Mutex::new(mock_client(&server.uri())));
+        let watcher = ArrivalWatcher::new(
+            client.clone(),
+            Some("INBOX"),
+            true,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(watcher.state, "present");
+        assert_eq!(watcher.mailbox_id.as_deref(), Some("mb1"));
+        assert!(watcher.full);
+        assert!(!watcher.retry_pending);
+        assert!(matches!(watcher.wake, Wake::Poll(interval) if interval == Duration::from_secs(1)));
+        let result = ArrivalWatcher::new(client, Some("missing"), false, None).await;
+        assert!(matches!(result, Err(Error::MailboxNotFound(name)) if name == "missing"));
+        let methods: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                body["methodCalls"][0][0].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(methods, ["Mailbox/get", "Email/get", "Mailbox/get"]);
     }
 
     fn email_in(mailbox_ids: &[&str]) -> Email {
