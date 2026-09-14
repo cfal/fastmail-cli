@@ -35,6 +35,8 @@ reviews. No deliberately malicious code was identified in the reviewed scope.
 - Refresh agent references and restore the missing v4.0.0 changelog entry.
 - Simplify shared command, contact, compose, request and GraphQL logic while
   preserving public interfaces, command output and security limits.
+- Reorganize test suites and expand behavioral coverage across protocols,
+  configuration, CLI and browser workflows. Enforce documentation checks in CI.
 
 No vendoring or new authentication requirement. Existing time-limited `lru` and
 `paste` dependency dispositions remain documented in `SECURITY.md`.

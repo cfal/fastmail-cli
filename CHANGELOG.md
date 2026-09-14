@@ -37,6 +37,9 @@
 - Simplify CLI dispatch, CardDAV parsing, JMAP request/error construction,
   GraphQL results and pagination, and shared input/subject helpers without
   changing public interfaces or command output.
+- Organize test suites by domain, replace redundant assertions with stronger
+  behavior checks, and expand protocol, configuration, CLI and browser coverage.
+  Check documentation warnings in CI.
 
 Authentication remains optional. No malicious code was identified in the reviewed
 first-party source or targeted dependencies; the existing documented dependency
