@@ -217,12 +217,15 @@ sequence in order, without concatenating alternative representations. No
 unchanged. Reading does not mark mail read.
 
 HTML conversion uses [html-to-markdown-rs](https://github.com/xberg-io/html-to-markdown)
-locally. It preserves links, lists, tables, and quoted conversations without
-article extraction or quote trimming. Images become alt-text/placeholders;
+locally. Markdown preserves links, lists, tables, and quotation structure without
+article extraction or quote trimming; plain-text rendering retains the content
+but simplifies formatting. Plain-text parts in a Markdown view use literal blocks
+to preserve line breaks and indentation. Images become alt-text/placeholders;
 scripts, styles, comments, and obviously hidden elements are omitted. No remote,
 CID, or data-URL resource is loaded, and no scripts execute. Image-only content
 still needs separate inspection. Layout and visibility are best-effort, not a
 browser rendering or a security sanitizer; all content remains untrusted.
+Text mode reports omitted SVG/MathML with a notice at the end of the body part.
 
 The derived view processes at most 128 parts and 1 MiB of selected input, emits
 at most 1 MiB of content, and uses a 64-level HTML traversal limit. Oversized HTML

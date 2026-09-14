@@ -10,6 +10,10 @@
   Markdown, and plain-text selection plus CLI raw-only output. Conversion does
   not fetch resources or execute scripts and bounds input, output, and depth.
 
+### Fixed
+
+- Write diagnostic logs to stderr so JSON and NDJSON on stdout remain parseable.
+
 ## [4.0.3] - 2026-09-14
 
 ### Added

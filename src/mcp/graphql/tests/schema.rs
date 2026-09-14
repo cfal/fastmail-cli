@@ -117,11 +117,11 @@ async fn documented_examples_execute() {
     let server = mock_server(10).await;
     let documented = [
         "{ emails(filter: { inMailbox: \"INBOX\" }, first: 10) { nodes { \
-            subject from { name email } textBody \
+            subject from { name email } readableBody { format content isTruncated isEncodingProblem warnings } \
             attachments { nodes { name contentType size cid text } } } } }",
         "{ mailbox(name: \"INBOX\") { name children { nodes { name unreadEmails } } \
             emails(first: 5) { nodes { subject \
-              thread { total emails { nodes { subject textBody } } } \
+              thread { total emails { nodes { subject readableBody { format content warnings } } } } \
               mailboxes { name role } } } } }",
         "{ emails(filter: { unread: true }, sort: [{ property: SIZE, ascending: false }], \
             first: 20) { totalCount nodes { subject size } } }",
