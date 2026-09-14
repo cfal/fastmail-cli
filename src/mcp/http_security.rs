@@ -262,35 +262,32 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn body_limit_covers_sized_and_streamed_input() {
+    async fn bounded_body_preserves_request_parts_and_exact_limit_payloads() {
         use axum::body::{Body, Bytes};
-        let sized = Request::builder()
-            .header("Content-Length", "17")
-            .body(Body::from("abcdefghijklmnopq"))
-            .unwrap();
-        assert_eq!(
-            bounded_body(sized, 16).await.unwrap_err(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
         let chunks = async_graphql::futures_util::stream::iter([
             Ok::<_, std::io::Error>(Bytes::from_static(b"abcdefgh")),
             Ok(Bytes::from_static(b"ijklmnop")),
-            Ok(Bytes::from_static(b"q")),
         ]);
-        let streamed = Request::new(Body::from_stream(chunks));
-        assert_eq!(
-            bounded_body(streamed, 16).await.unwrap_err(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
-        let accepted = bounded_body(Request::new(Body::from("abcdefghijklmnop")), 16)
-            .await
-            .unwrap();
-        assert_eq!(
-            axum::body::to_bytes(accepted.into_body(), 16)
-                .await
-                .unwrap(),
-            "abcdefghijklmnop"
-        );
+        for body in [Body::from("abcdefghijklmnop"), Body::from_stream(chunks)] {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/mcp?session=test")
+                .header("mcp-session-id", "test-session")
+                .extension(42_u32)
+                .body(body)
+                .unwrap();
+            let accepted = bounded_body(request, 16).await.unwrap();
+            assert_eq!(accepted.method(), "POST");
+            assert_eq!(accepted.uri(), "/mcp?session=test");
+            assert_eq!(accepted.headers()["mcp-session-id"], "test-session");
+            assert_eq!(accepted.extensions().get::<u32>(), Some(&42));
+            assert_eq!(
+                axum::body::to_bytes(accepted.into_body(), 16)
+                    .await
+                    .unwrap(),
+                "abcdefghijklmnop"
+            );
+        }
     }
 
     #[test]
@@ -317,6 +314,7 @@ mod tests {
             ("bob:different", true),
             ("alice:different", false),
             ("unknown:a:password", false),
+            ("ALICE:a:password", false),
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -328,11 +326,32 @@ mod tests {
             assert_eq!(auth.accepts(&headers), accepted);
         }
         assert!(!auth.accepts(&HeaderMap::new()));
-        for value in ["Basic ???", "Bearer value", "Basic YWxpY2U="] {
+        for value in [
+            "Basic ???",
+            "Bearer value",
+            "Basic YWxpY2U=",
+            "Basic",
+            "Basic\tYWxpY2U=",
+            "Basic /w==",
+        ] {
             let mut headers = HeaderMap::new();
             headers.insert(header::AUTHORIZATION, value.parse().unwrap());
-            assert!(!auth.accepts(&headers));
+            assert!(!auth.accepts(&headers), "{value}");
         }
+        let mut headers = HeaderMap::new();
+        let credentials = format!("bAsIc {}", STANDARD.encode("alice:a:password"));
+        headers.insert(header::AUTHORIZATION, credentials.parse().unwrap());
+        assert!(auth.accepts(&headers));
+        headers.append(header::AUTHORIZATION, credentials.parse().unwrap());
+        assert!(
+            !auth.accepts(&headers),
+            "Duplicate authorization is ambiguous"
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            http::HeaderValue::from_bytes(b"Basic \xff").unwrap(),
+        );
+        assert!(!auth.accepts(&headers));
     }
 
     #[test]
@@ -343,10 +362,73 @@ mod tests {
             "users = 'secret'",
             "[users]\nalice='secret' garbage",
             "[users]\nalice='first'\nalice='second'",
+            "[users]\n''='secret'",
+            "[users]\n'alice:bob'='secret'",
+            "[users]\n'alice' = \"secret\\n\"",
+            "[users]\n\"ali\\nce\"='secret'",
+            "unexpected = 'secret'\n[users]\nalice='password'",
         ] {
             let error = BasicAuth::parse(input).err().unwrap().to_string();
             assert!(!error.contains("secret"));
         }
+    }
+
+    #[test]
+    fn auth_files_are_size_bounded_before_parsing() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&vec![b' '; 1024 * 1024 + 1]).unwrap();
+        assert_eq!(
+            BasicAuth::load(file.path()).err().unwrap().to_string(),
+            "Auth file exceeds 1 MiB"
+        );
+    }
+
+    #[test]
+    fn browser_policy_rejects_ambiguous_and_non_origin_headers() {
+        let policy = HttpSecurity::new("127.0.0.1:8080".parse().unwrap(), None, vec![]).unwrap();
+        assert!(!policy.check_browser(&HeaderMap::new()));
+        for origin in [
+            "http://user@localhost:8080",
+            "http://user:password@localhost:8080",
+            "http://localhost:8080/path",
+            "http://localhost:8080/?query",
+            "http://localhost:8080/#fragment",
+            "ftp://localhost:8080",
+        ] {
+            assert!(
+                !policy.check_browser(&headers("localhost:8080", Some(origin))),
+                "{origin}"
+            );
+        }
+        for duplicate in [header::HOST, header::ORIGIN] {
+            let mut input = headers("localhost:8080", Some("http://localhost:8080"));
+            input.append(duplicate.clone(), input[&duplicate].clone());
+            assert!(!policy.check_browser(&input), "{duplicate}");
+        }
+        let mut input = headers("localhost:8080", None);
+        input.insert("sec-fetch-site", "cross-site".parse().unwrap());
+        assert!(!policy.check_browser(&input));
+        assert!(!policy.check_browser(&headers("user@localhost:8080", None)));
+        assert!(!policy.check_browser(&headers("invalid host", None)));
+    }
+
+    #[test]
+    fn allowed_hosts_are_normalized_and_cannot_contain_ports_or_userinfo() {
+        for host in ["mail.example:8080", "user@mail.example", "invalid/host"] {
+            assert!(
+                HttpSecurity::new("0.0.0.0:8080".parse().unwrap(), None, vec![host.into()])
+                    .is_err()
+            );
+        }
+        let policy = HttpSecurity::new(
+            "0.0.0.0:8080".parse().unwrap(),
+            None,
+            vec!["MAIL.Example".into()],
+        )
+        .unwrap();
+        assert!(policy.check_browser(&headers("mail.example:8080", None)));
+        assert!(!policy.check_browser(&headers("localhost:8080", None)));
     }
 
     #[test]
