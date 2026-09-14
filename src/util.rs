@@ -538,9 +538,10 @@ mod tests {
                 .send()
                 .await
                 .unwrap()
-                .text()
-                .await
+                .headers()["x-client-address"]
+                .to_str()
                 .unwrap()
+                .to_owned()
         }
 
         let server_runtime = Builder::new_multi_thread()
@@ -553,7 +554,9 @@ mod tests {
             let port = listener.local_addr().unwrap().port();
             let router = Router::new().route(
                 "/",
-                get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move { peer.to_string() }),
+                get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move {
+                    ([("x-client-address", peer.to_string())], "")
+                }),
             );
             tokio::spawn(async move {
                 axum::serve(
@@ -572,18 +575,23 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let (client_a, peer_a) = runtime_a.block_on(async {
-            let client = http_client().unwrap();
-            let first = peer(&client, &url).await;
-            assert_eq!(peer(&client, &url).await, first);
-            let cached = http_client().unwrap();
-            assert_eq!(
-                peer(&cached, &url).await,
-                first,
-                "Cache hit must reuse the pool"
-            );
-            (client, first)
-        });
+        // Bodyless responses and one worker let Hyper park the connection
+        // before the next request, rather than racing body completion on block_on.
+        let url_a = url.clone();
+        let (client_a, peer_a) = runtime_a
+            .block_on(runtime_a.spawn(async move {
+                let client = http_client().unwrap();
+                let first = peer(&client, &url_a).await;
+                assert_eq!(peer(&client, &url_a).await, first);
+                let cached = http_client().unwrap();
+                assert_eq!(
+                    peer(&cached, &url_a).await,
+                    first,
+                    "Cache hit must reuse the pool"
+                );
+                (client, first)
+            }))
+            .unwrap();
         let runtime_b = Builder::new_current_thread().enable_all().build().unwrap();
         let (client_b, peer_b) = runtime_b.block_on(async {
             let client = http_client().unwrap();

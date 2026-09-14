@@ -52,11 +52,27 @@ class LruGuardTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not a git repository", result.stderr)
 
+    def test_empty_source_scope_fails(self):
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        result = self.run_guard()
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_relocated_source_scope_fails(self):
+        self.repository("type RecordCache = LruCache;\n")
+        (self.root / "crates").mkdir()
+        subprocess.run(
+            ["git", "mv", "src", "crates/app"], cwd=self.root, check=True
+        )
+        result = self.run_guard()
+        self.assertNotEqual(result.returncode, 0)
+
     def test_missing_git_fails(self):
         self.repository("type RecordCache = HashMapCache;\n")
         result = self.run_guard({**os.environ, "PATH": ""})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("git", result.stderr)
+        self.assertRegex(
+            result.stderr, r"\bgit: (command not found|No such file or directory)"
+        )
 
 
 if __name__ == "__main__":
