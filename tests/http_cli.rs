@@ -1,3 +1,4 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tokio::process::Command;
 use wiremock::{
@@ -73,19 +74,149 @@ async fn server() -> MockServer {
     server
 }
 
-fn command(server: &MockServer, home: &std::path::Path) -> Command {
+fn isolated_command(home: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fastmail"));
     command
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
         .env_remove("FASTMAIL_SERVER")
         .env_remove("FASTMAIL_SERVER_USER")
+        .env_remove("FASTMAIL_SERVER_PASSWORD")
+        .env_remove("RUST_LOG")
         .env("FASTMAIL_API_TOKEN", "must-not-be-used")
         .env("FASTMAIL_USERNAME", "must-not-be-used")
-        .env("FASTMAIL_APP_PASSWORD", "must-not-be-used")
+        .env("FASTMAIL_APP_PASSWORD", "must-not-be-used");
+    command
+}
+
+fn command(server: &MockServer, home: &std::path::Path) -> Command {
+    let mut command = isolated_command(home);
+    command
         .env("FASTMAIL_SERVER_PASSWORD", "http-password")
         .args(["--server", &server.uri(), "--server-user", "cli"]);
     command
+}
+
+fn url_command(server: &MockServer, home: &std::path::Path) -> Command {
+    let mut command = isolated_command(home);
+    command.env(
+        "FASTMAIL_SERVER",
+        format!(
+            "http://cli%2Btest:http%3Apass%40word%2B@{}",
+            server.address()
+        ),
+    );
+    command
+}
+
+async fn bounded_output(command: &mut Command) -> std::process::Output {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        command.kill_on_drop(true).output(),
+    )
+    .await
+    .expect("CLI timed out")
+    .unwrap()
+}
+
+#[tokio::test]
+async fn server_url_env_authenticates_mail_and_contacts() {
+    let server = server().await;
+    let home = tempfile::tempdir().unwrap();
+    for (args, expected_id) in [
+        (["list", "mailboxes"], "inbox"),
+        (["contacts", "list"], "contact1"),
+    ] {
+        let output = bounded_output(url_command(&server, home.path()).args(args)).await;
+        assert!(output.status.success(), "{output:?}");
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["data"][0]["id"], expected_id);
+        for text in [&output.stdout, &output.stderr] {
+            let text = String::from_utf8_lossy(text);
+            assert!(!text.contains("http:pass@word+"));
+            assert!(!text.contains("http%3Apass%40word%2B"));
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 4);
+    for request in requests {
+        assert_eq!(
+            request.headers["authorization"],
+            format!("Basic {}", STANDARD.encode("cli+test:http:pass@word+"))
+        );
+        assert!(!request.headers.contains_key("x-fastmail-token"));
+    }
+    assert!(
+        !home
+            .path()
+            .join(".config/fastmail-cli/config.toml")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn help_and_argument_errors_hide_server_credentials() {
+    let home = tempfile::tempdir().unwrap();
+    let url = "https://private-user:private-password%40@example.invalid:8443";
+    for (args, success) in [
+        (vec!["--help"], true),
+        (vec!["list", "mailboxes", "--help"], true),
+        (vec!["--not-a-flag"], false),
+    ] {
+        let output = bounded_output(
+            isolated_command(home.path())
+                .env("FASTMAIL_SERVER", url)
+                .env("FASTMAIL_SERVER_USER", "separate-http-login")
+                .args(&args),
+        )
+        .await;
+        assert_eq!(output.status.success(), success, "{args:?}");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!text.contains("private-user"));
+        assert!(!text.contains("private-password"));
+        assert!(!text.contains("separate-http-login"));
+        if success {
+            assert!(text.contains("FASTMAIL_SERVER"));
+            assert!(text.contains("--server"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn mixed_server_login_sources_fail_before_network_access() {
+    let server = server().await;
+    let home = tempfile::tempdir().unwrap();
+    for (user, password) in [
+        (Some("other-user"), None),
+        (None, Some("other-password")),
+        (Some("other-user"), Some("other-password")),
+        (Some(""), None),
+        (None, Some("")),
+        (Some(""), Some("")),
+    ] {
+        let mut command = url_command(&server, home.path());
+        if let Some(user) = user {
+            command.env("FASTMAIL_SERVER_USER", user);
+        }
+        if let Some(password) = password {
+            command.env("FASTMAIL_SERVER_PASSWORD", password);
+        }
+        let output = bounded_output(command.args(["list", "mailboxes"])).await;
+        assert_eq!(output.status.code(), Some(1));
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result,
+            json!({"success":false, "error":
+                "Config error: Use either server URL credentials or --server-user and FASTMAIL_SERVER_PASSWORD, not both"})
+        );
+        assert!(output.stderr.is_empty());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -543,11 +674,17 @@ async fn http_login_never_follows_redirects_or_falls_back_to_fastmail() {
         .mount(&server)
         .await;
     let home = tempfile::tempdir().unwrap();
-    let output = command(&server, home.path())
-        .args(["list", "mailboxes"])
-        .output()
-        .await
-        .unwrap();
-    assert!(!output.status.success());
+    for mut command in [
+        command(&server, home.path()),
+        url_command(&server, home.path()),
+    ] {
+        let output = bounded_output(command.args(["list", "mailboxes"])).await;
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["success"], false);
+        assert!(!result.to_string().contains("http%3Apass%40word%2B"));
+        assert!(!result.to_string().contains("http:pass@word+"));
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
     assert!(destination.received_requests().await.unwrap().is_empty());
 }

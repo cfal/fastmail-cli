@@ -37,7 +37,13 @@ fn build_compose_params<'a>(
 #[command(version, about = "CLI for Fastmail's JMAP API", long_about = None)]
 struct Cli {
     /// Run mail and contact commands through this HTTP server
-    #[arg(long, global = true, env = "FASTMAIL_SERVER", value_name = "URL")]
+    #[arg(
+        long,
+        global = true,
+        env = "FASTMAIL_SERVER",
+        hide_env_values = true,
+        value_name = "URL"
+    )]
     server: Option<String>,
 
     /// Optional HTTP Basic username; password comes from FASTMAIL_SERVER_PASSWORD
@@ -45,6 +51,7 @@ struct Cli {
         long,
         global = true,
         env = "FASTMAIL_SERVER_USER",
+        hide_env_values = true,
         value_name = "USERNAME"
     )]
     server_user: Option<String>,

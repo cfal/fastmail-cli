@@ -17,7 +17,8 @@ unique passwords and a rate-limiting reverse proxy for online-guessing resistanc
 
 Protect both the Fastmail config and Basic auth file with private filesystem
 permissions. Passwords in the auth file are plaintext. The server loads it at
-startup; restart after editing it. Do not put secrets in URLs or query strings.
+startup; restart after editing it. Do not put Fastmail tokens in URLs or query
+strings.
 Loopback listeners enforce a localhost/loopback Host allowlist. Set
 `--allowed-host` for custom hostnames or proxy deployments. Browser origins must
 match the request Host; these checks are defense in depth, not authentication.
@@ -25,6 +26,16 @@ match the request Host; these checks are defense in depth, not authentication.
 The CLI's `--server` mode sends all Fastmail requests through that server and
 never falls back to local Fastmail credentials. Input attachments, downloaded
 files, text extraction and user confirmations remain on the client.
+
+For optional CLI Basic auth, use either a secret `FASTMAIL_SERVER` URL such as
+`https://user:pass@server.example:8443`, or the separate `FASTMAIL_SERVER_USER`
+and `FASTMAIL_SERVER_PASSWORD` settings. Mixed credential sources are rejected.
+URL credentials are percent-decoded and removed before constructing request URLs;
+the authorization header is marked sensitive, and CLI help hides server URL
+and username environment values. Do not pass a credential-bearing URL as a
+command-line argument or expose it in logs, shell history, or query strings.
+Environment variables still require protection from other processes with access
+to them.
 
 ## Resource Limits
 

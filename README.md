@@ -95,9 +95,28 @@ fastmail --server http://127.0.0.1:8080 watch
 ```
 
 `FASTMAIL_SERVER` can supply the URL. When the server uses optional Basic auth,
-set `FASTMAIL_SERVER_USER` (or `--server-user`) and `FASTMAIL_SERVER_PASSWORD`.
-Use a secret manager or private environment configuration for the password,
-not a URL or command-line argument. Use HTTPS for remote authenticated access.
+either include the login in that URL or set `FASTMAIL_SERVER_USER` (or
+`--server-user`) and `FASTMAIL_SERVER_PASSWORD` separately. For example, using
+placeholder credentials:
+
+```bash
+export FASTMAIL_SERVER='https://user:pass@server.example:8443'
+fastmail list emails
+```
+
+Percent-encode reserved characters in the username and password, such as `%40`
+for `@`, `%23` for `#`, `%2F` for `/`, and `%3F` for `?`; write a literal `%` as
+`%25`. `+` remains a literal plus. Both values must be nonempty, and the username
+cannot contain a colon. Server URLs must not contain raw control characters,
+including trailing CR/LF from a secret file. Do not combine URL credentials
+with the separate login settings; mixed sources are rejected. Unset unused
+credential variables; empty values still count as a second source.
+
+The CLI extracts URL credentials into the Basic authorization header, removes
+them from request URLs, and hides server URL and username environment values in
+help output. Treat the whole credential-bearing URL as a secret: load it from a
+secret manager or private environment configuration, not a command-line argument
+or shell history. Use HTTPS for remote authenticated access.
 
 Mail, mailbox, identity, masked-email, contact, attachment and watch requests
 all go through `/cli/v1/*`. There is no direct Fastmail fallback. Attachment

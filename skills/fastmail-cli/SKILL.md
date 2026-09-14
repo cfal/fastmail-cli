@@ -31,10 +31,10 @@ Direct email access uses `FASTMAIL_API_TOKEN` or `[core].api_token` in
 described in their reference.
 
 Use existing authorized credentials. Do not print secrets or put them in command
-arguments, URLs, or shell history. When loading a token from an authorized file,
-remove trailing CR/LF before setting the environment variable. Keep credential
-files private and disable shell tracing. To authenticate and persist a token,
-only when setup is requested:
+arguments or shell history. Never put Fastmail API tokens in URLs. When loading
+a token from an authorized file, remove trailing CR/LF before setting the
+environment variable. Keep credential files private and disable shell tracing.
+To authenticate and persist a token, only when setup is requested:
 
 ```bash
 fastmail auth < /secure/fastmail-token
@@ -47,11 +47,28 @@ Fastmail credentials, and has no direct fallback:
 fastmail --server http://127.0.0.1:8080 list mailboxes
 ```
 
-`FASTMAIL_SERVER` also selects the server. Optional Basic login uses
-`--server-user` / `FASTMAIL_SERVER_USER` and `FASTMAIL_SERVER_PASSWORD`. This is
-server access control, not Fastmail authentication. Use HTTPS for remote Basic
-login. All permitted callers access the same server-owned account. `auth` and
-`mcp` run locally and reject `--server`.
+`FASTMAIL_SERVER` also selects the server and can include optional Basic login:
+
+```bash
+export FASTMAIL_SERVER='https://user:pass@server.example:8443'
+fastmail list mailboxes
+```
+
+These are placeholder credentials. Load the real URL from an authorized secret
+source, not shell history or a command-line argument. Percent-encode reserved
+characters in credentials (`%40` for `@`, `%23` for `#`, `%2F` for `/`, `%3F` for
+`?`); write a literal `%` as `%25`. `+` stays literal. Server URLs must not contain
+raw control characters; remove trailing CR/LF when loading a URL from a file.
+Username and password must be nonempty, and the username cannot contain a colon.
+The CLI strips credentials from request URLs and hides server URL and username
+env values in help.
+
+Alternatively use `--server-user` / `FASTMAIL_SERVER_USER` together with
+`FASTMAIL_SERVER_PASSWORD`. Do not mix URL credentials with either separate
+setting, even an empty value; unset unused credential variables. This is server
+access control, not Fastmail authentication. Use HTTPS for remote Basic login.
+All permitted callers access the same server-owned account. `auth` and `mcp` run
+locally and reject `--server`.
 
 ## Operation Boundaries
 
