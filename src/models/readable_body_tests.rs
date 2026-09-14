@@ -26,8 +26,103 @@ fn readable_body_preserves_genuine_plain_text_and_raw_fields() {
 
     let markdown = message.readable_body(BodyPreference::Markdown).unwrap();
     assert_eq!(markdown.format, ReadableBodyFormat::Markdown);
-    assert!(markdown.content.contains("\\<b\\>not HTML\\<\\/b\\>"));
-    assert!(markdown.content.contains("\\!\\[image\\]"));
+    let events: Vec<_> = pulldown_cmark::Parser::new(&markdown.content).collect();
+    assert!(matches!(
+        events.first(),
+        Some(pulldown_cmark::Event::Start(
+            pulldown_cmark::Tag::CodeBlock(_)
+        ))
+    ));
+    let literal: String = events
+        .iter()
+        .filter_map(|event| match event {
+            pulldown_cmark::Event::Text(text) => Some(text.as_ref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(literal, message.text_content().unwrap());
+}
+
+#[test]
+fn readable_body_preserves_plaintext_layout_in_markdown() {
+    let content = "Hard-wrapped\nmessage\n\n    | total | $42 |\n\t* literal bullet\n```\n~~~~\n[link](https://example.test)\n";
+    let body = email("text/plain", content)
+        .readable_body(BodyPreference::Markdown)
+        .unwrap();
+    let events: Vec<_> = pulldown_cmark::Parser::new(&body.content).collect();
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(matches!(
+        events[0],
+        pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_))
+    ));
+    assert_eq!(events[1], pulldown_cmark::Event::Text(content.into()));
+}
+
+#[test]
+fn readable_body_accepts_mime_parameters_without_changing_provenance() {
+    for mime in ["text/html; charset=utf-8", " TEXT/HTML ; charset=\"utf-8\""] {
+        let body = email(mime, "<p>Message</p>")
+            .readable_body(BodyPreference::Auto)
+            .unwrap();
+        assert_eq!(body.content, "Message");
+        assert_eq!(body.format, ReadableBodyFormat::Markdown);
+        assert_eq!(body.source_parts[0].content_type.as_deref(), Some(mime));
+        assert!(body.warnings.is_empty());
+    }
+}
+
+#[test]
+fn readable_body_preserves_loss_flags_on_omitted_parts() {
+    for mime in ["image/png", "application/pdf", ""] {
+        let mut message = email(mime, "unrendered value");
+        let value = message.body_values.as_mut().unwrap().get_mut("1").unwrap();
+        value.is_truncated = true;
+        value.is_encoding_problem = true;
+        let body = message.readable_body(BodyPreference::Auto).unwrap();
+        assert_eq!(body.content, "[Non-text body part omitted]");
+        assert!(body.is_truncated);
+        assert!(body.is_encoding_problem);
+        assert!(body.warnings.iter().any(|w| w.contains("JMAP truncated")));
+        assert!(body.warnings.iter().any(|w| w.contains("encoding problem")));
+    }
+}
+
+#[test]
+fn readable_body_plain_text_reports_omitted_graphics() {
+    for tag in ["svg", "math"] {
+        let html = format!("<p>before</p><{tag}><text>private graphic</text></{tag}><p>after</p>");
+        let body = email("text/html", &html)
+            .readable_body(BodyPreference::Text)
+            .unwrap();
+        assert_eq!(body.content, "before\n\nafter\n\n[Embedded media omitted]");
+        assert!(body.warnings.iter().any(|w| w.contains("Embedded media")));
+    }
+}
+
+#[test]
+fn readable_body_placeholders_cannot_create_markdown_links() {
+    for html in [
+        "<img alt='Click here'>(https://evil.example/x)",
+        "<img>(https://evil.example/x)",
+        "<svg></svg>(https://evil.example/x)",
+        "<iframe></iframe>(https://evil.example/x)",
+    ] {
+        let body = email("text/html", html)
+            .readable_body(BodyPreference::Auto)
+            .unwrap();
+        for event in pulldown_cmark::Parser::new(&body.content) {
+            assert!(
+                !matches!(
+                    event,
+                    pulldown_cmark::Event::Start(
+                        pulldown_cmark::Tag::Link { .. } | pulldown_cmark::Tag::Image { .. }
+                    )
+                ),
+                "unexpected generated link: {event:?}; {}",
+                body.content
+            );
+        }
+    }
 }
 
 #[test]
@@ -120,7 +215,10 @@ fn readable_body_chooses_one_alternative_and_keeps_part_order() {
         );
     }
     let body = message.readable_body(BodyPreference::Markdown).unwrap();
-    assert_eq!(body.content.trim(), "rich alternative\n\nfooter");
+    assert_eq!(
+        body.content.trim(),
+        "rich alternative\n\n```text\nfooter\n```"
+    );
     assert!(!body.content.contains("plain alternative"));
     assert_eq!(
         body.source_parts

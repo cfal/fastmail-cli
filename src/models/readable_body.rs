@@ -113,28 +113,32 @@ impl Email {
                 part_id: part.part_id.clone(),
                 content_type: part.content_type.clone(),
             });
+            let value = part
+                .part_id
+                .as_ref()
+                .and_then(|id| self.body_values.as_ref()?.get(id));
+            if let Some(value) = value {
+                body.is_truncated |= value.is_truncated;
+                body.is_encoding_problem |= value.is_encoding_problem;
+                if value.is_truncated {
+                    body.warn(
+                        "JMAP truncated a selected body value; this reading view is incomplete.",
+                    );
+                }
+                if value.is_encoding_problem {
+                    body.warn("JMAP reported an encoding problem in a selected body value.");
+                }
+            }
             if !is_type(part, "text/plain") && !is_type(part, "text/html") {
                 body.warn("A non-text or untyped body part was omitted; inspect its original metadata or attachment.");
                 body.append("[Non-text body part omitted]");
                 continue;
             }
-            let value = part
-                .part_id
-                .as_ref()
-                .and_then(|id| self.body_values.as_ref()?.get(id));
             let Some(value) = value else {
                 body.warn("A selected body value is unavailable; this reading view is incomplete.");
                 body.append("[Body part unavailable]");
                 continue;
             };
-            body.is_truncated |= value.is_truncated;
-            body.is_encoding_problem |= value.is_encoding_problem;
-            if value.is_truncated {
-                body.warn("JMAP truncated a selected body value; this reading view is incomplete.");
-            }
-            if value.is_encoding_problem {
-                body.warn("JMAP reported an encoding problem in a selected body value.");
-            }
             if value.value.len() > remaining_input {
                 body.is_truncated = true;
                 body.warn("Readable body reached the 1 MiB input limit; inspect the original body values.");
@@ -149,7 +153,7 @@ impl Email {
             if is_type(part, "text/html") {
                 convert_html(input, &mut body);
             } else if format == ReadableBodyFormat::Markdown {
-                body.append(&escape_markdown(input));
+                body.append(&literal_markdown(input));
             } else {
                 body.append(input);
             }
@@ -166,9 +170,13 @@ impl Email {
 }
 
 fn is_type(part: &EmailBodyPart, expected: &str) -> bool {
-    part.content_type
-        .as_deref()
-        .is_some_and(|mime| mime.eq_ignore_ascii_case(expected))
+    part.content_type.as_deref().is_some_and(|mime| {
+        mime.split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case(expected)
+    })
 }
 
 fn utf8_prefix(value: &str, limit: usize) -> &str {
@@ -186,11 +194,33 @@ fn escape_markdown(value: &str) -> String {
     output
 }
 
+fn literal_markdown(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    // A fence longer than any source run preserves both layout and literal Markdown.
+    let longest_run = value.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(3.max(longest_run + 1));
+    let newline = if value.ends_with('\n') { "" } else { "\n" };
+    format!("{fence}text\n{value}{newline}{fence}")
+}
+
 #[derive(Debug, Default)]
 struct EmailHtmlVisitor {
     markdown: bool,
     omitted_images: bool,
     omitted_media: bool,
+    omitted_graphics: bool,
+}
+
+impl EmailHtmlVisitor {
+    fn placeholder(&self, label: &str) -> VisitResult {
+        VisitResult::Custom(if self.markdown {
+            format!("\\[{}\\]", escape_markdown(label))
+        } else {
+            format!("[{label}]")
+        })
+    }
 }
 
 impl HtmlVisitor for EmailHtmlVisitor {
@@ -205,19 +235,15 @@ impl HtmlVisitor for EmailHtmlVisitor {
                     .unwrap_or("");
                 let alt = html_escape::decode_html_entities(alt);
                 if alt.trim().is_empty() {
-                    VisitResult::Custom("[Image omitted]".to_owned())
+                    self.placeholder("Image omitted")
                 } else {
-                    let alt = if self.markdown {
-                        escape_markdown(alt.trim())
-                    } else {
-                        alt.trim().to_owned()
-                    };
-                    VisitResult::Custom(format!("[Image: {alt}]"))
+                    self.placeholder(&format!("Image: {}", alt.trim()))
                 }
             }
             "svg" | "math" | "iframe" | "object" | "embed" | "video" | "audio" => {
                 self.omitted_media = true;
-                VisitResult::Custom("[Embedded media omitted]".to_owned())
+                self.omitted_graphics |= matches!(ctx.tag_name.as_ref(), "svg" | "math");
+                self.placeholder("Embedded media omitted")
             }
             "script" | "style" | "head" | "template" => VisitResult::Skip,
             _ => VisitResult::Continue,
@@ -296,6 +322,10 @@ fn convert_html(input: &str, body: &mut ReadableBody) {
         }
     }
     let visitor = visitor.lock().unwrap();
+    if !visitor.markdown && visitor.omitted_graphics {
+        // The converter's plain walker skips SVG/MathML before invoking visitors.
+        body.append("[Embedded media omitted]");
+    }
     if visitor.omitted_images {
         body.warn(
             "Images were not loaded; alt text is not a substitute for inspecting image content.",
