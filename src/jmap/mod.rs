@@ -517,10 +517,18 @@ fn apply_url_template(tmpl: &str, vars: &[(&str, &str)]) -> String {
 
 fn pick_identity(identities: Vec<Identity>, from: Option<&str>) -> Result<Identity> {
     let Some(from) = from else {
+        if identities.is_empty() {
+            return Err(Error::IdentityNotFound);
+        }
         return identities
             .into_iter()
             .find(|identity| !identity.email.starts_with("*@"))
-            .ok_or(Error::IdentityNotFound);
+            .ok_or_else(|| {
+                Error::Config(
+                    "Only domain identities are available: specify a concrete sender using --from (GraphQL: from)"
+                        .into(),
+                )
+            });
     };
     let invalid = || {
         Error::Config(
@@ -1505,7 +1513,6 @@ impl JmapClient {
         Ok(email_id)
     }
 
-    #[instrument(skip(self, to, subject, body, params))]
     pub async fn send_email(
         &mut self,
         to: Vec<EmailAddress>,
@@ -1518,6 +1525,10 @@ impl JmapClient {
             .await
     }
 
+    #[instrument(
+        name = "send_email",
+        skip(self, to, subject, body, params, resolved_identity)
+    )]
     pub(crate) async fn send_email_with_identity(
         &mut self,
         to: Vec<EmailAddress>,
@@ -1663,7 +1674,6 @@ impl JmapClient {
     /// on the caller side means the MCP preview path and the send path use
     /// exactly the same recipient lists, so the preview cannot under-report
     /// or diverge from what will actually be sent.
-    #[instrument(skip(self, original, to, body, params))]
     pub async fn reply_email(
         &mut self,
         original: &Email,
@@ -1675,6 +1685,10 @@ impl JmapClient {
             .await
     }
 
+    #[instrument(
+        name = "reply_email",
+        skip(self, original, to, body, params, resolved_identity)
+    )]
     pub(crate) async fn reply_email_with_identity(
         &mut self,
         original: &Email,
@@ -1724,7 +1738,6 @@ impl JmapClient {
     }
 
     /// Forward an email with proper attribution
-    #[instrument(skip(self, original, to, body, params))]
     pub async fn forward_email(
         &mut self,
         original: &Email,
@@ -1736,6 +1749,10 @@ impl JmapClient {
             .await
     }
 
+    #[instrument(
+        name = "forward_email",
+        skip(self, original, to, body, params, resolved_identity)
+    )]
     pub(crate) async fn forward_email_with_identity(
         &mut self,
         original: &Email,

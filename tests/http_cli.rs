@@ -223,12 +223,29 @@ async fn domain_sender_and_name_reach_send_reply_forward_and_drafts() {
 }
 
 #[tokio::test]
-async fn invalid_explicit_senders_never_create_mail_even_for_drafts() {
+async fn invalid_or_missing_senders_never_create_mail() {
     let server = server_with_identities(json!([
         {"id":"domain","name":"Saved Name","email":"*@example.com"}
     ]))
     .await;
     let home = tempfile::tempdir().unwrap();
+    let output = bounded_output(command(&server, home.path()).args([
+        "send",
+        "--to",
+        "other@example.com",
+        "--subject",
+        "Subject",
+        "--body",
+        "Body",
+    ]))
+    .await;
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["success"], false);
+    assert_eq!(
+        result["error"],
+        "Config error: Only domain identities are available: specify a concrete sender using --from (GraphQL: from)"
+    );
     for from in [
         "*@example.com",
         "new@sub.example.com",

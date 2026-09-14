@@ -579,10 +579,124 @@ fn default_sender_skips_wildcard_identities() {
     )
     .unwrap();
     assert_eq!(identity.id, "exact");
-    assert!(matches!(
-        pick_identity(vec![wildcard], None),
-        Err(Error::IdentityNotFound)
-    ));
+    assert_eq!(
+        pick_identity(vec![wildcard], None).unwrap_err().to_string(),
+        "Config error: Only domain identities are available: specify a concrete sender using --from (GraphQL: from)"
+    );
+}
+
+#[tokio::test]
+async fn compose_tracing_is_shared_and_skips_private_inputs() {
+    use std::sync::Mutex;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::prelude::*;
+
+    struct CaptureSpans(Arc<Mutex<Vec<&'static tracing::Metadata<'static>>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureSpans {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _: &tracing::span::Id,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0.lock().unwrap().push(attrs.metadata());
+        }
+    }
+
+    for resolved in [false, true] {
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureSpans(spans.clone()));
+        let mut client = JmapClient::new("private-token".into());
+        async {
+            let original = Email::default();
+            let params = || ComposeParams {
+                cc: vec![],
+                bcc: vec![],
+                from: Some("Private Name <private@example.com>"),
+                draft: false,
+                html_body: Some("private html".into()),
+                attachments: vec![],
+            };
+            let identity = || {
+                Some(Ok(test_identity(
+                    "private-id",
+                    "private@example.com",
+                    "Private Name",
+                )))
+            };
+            let result = if resolved {
+                client
+                    .send_email_with_identity(
+                        vec![],
+                        "private subject",
+                        "private body",
+                        None,
+                        params(),
+                        identity(),
+                    )
+                    .await
+            } else {
+                client
+                    .send_email(vec![], "private subject", "private body", None, params())
+                    .await
+            };
+            assert!(matches!(result, Err(Error::NotAuthenticated)));
+            let result = if resolved {
+                client
+                    .reply_email_with_identity(
+                        &original,
+                        "private body",
+                        vec![],
+                        params(),
+                        identity(),
+                    )
+                    .await
+            } else {
+                client
+                    .reply_email(&original, "private body", vec![], params())
+                    .await
+            };
+            assert!(matches!(result, Err(Error::NotAuthenticated)));
+            let result = if resolved {
+                client
+                    .forward_email_with_identity(
+                        &original,
+                        vec![],
+                        "private body",
+                        params(),
+                        identity(),
+                    )
+                    .await
+            } else {
+                client
+                    .forward_email(&original, vec![], "private body", params())
+                    .await
+            };
+            assert!(matches!(result, Err(Error::NotAuthenticated)));
+        }
+        .with_subscriber(subscriber)
+        .await;
+
+        let spans = spans.lock().unwrap();
+        let names: Vec<_> = spans.iter().map(|span| span.name()).collect();
+        assert_eq!(
+            names,
+            ["send_email", "reply_email", "forward_email"],
+            "resolved={resolved}"
+        );
+        for span in spans.iter() {
+            let fields: Vec<_> = span.fields().iter().map(|field| field.name()).collect();
+            assert_eq!(
+                fields,
+                if span.name() == "send_email" {
+                    vec!["in_reply_to"]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
 }
 
 #[test]
