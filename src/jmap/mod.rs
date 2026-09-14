@@ -1351,20 +1351,22 @@ impl JmapClient {
     /// identity resolution fails, so callers (notably the MCP preview path)
     /// can still produce a useful preview without erroring out.
     pub async fn resolve_my_email(&self, from: Option<&str>) -> Option<String> {
-        self.resolve_sender(from).await.map(|sender| sender.email)
-    }
-
-    pub(crate) async fn resolve_sender(&self, from: Option<&str>) -> Option<EmailAddress> {
-        self.resolve_identity(from)
+        self.resolve_sender(from)
             .await
             .ok()
-            .map(|identity| EmailAddress {
-                email: identity.email,
-                name: Some(identity.name),
-            })
+            .map(|sender| sender.email)
     }
 
-    async fn prepare_compose(&mut self, from: Option<&str>, draft: bool) -> Result<ComposeContext> {
+    pub(crate) async fn resolve_sender(&self, from: Option<&str>) -> Result<Identity> {
+        self.resolve_identity(from).await
+    }
+
+    async fn prepare_compose(
+        &mut self,
+        from: Option<&str>,
+        draft: bool,
+        resolved_identity: Option<Result<Identity>>,
+    ) -> Result<ComposeContext> {
         if !draft {
             self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
         }
@@ -1375,7 +1377,12 @@ impl JmapClient {
         } else {
             Some(self.find_mailbox("sent").await?)
         };
-        let identity = match self.resolve_identity(from).await {
+        // Confirmation supplies its reviewed identity, including a failed lookup.
+        let identity = match resolved_identity {
+            Some(identity) => identity,
+            None => self.resolve_identity(from).await,
+        };
+        let identity = match identity {
             Ok(id) => Some(id),
             Err(_) if draft && from.is_none() => None,
             Err(e) => return Err(e),
@@ -1489,7 +1496,22 @@ impl JmapClient {
         in_reply_to: Option<&str>,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        let ctx = self.prepare_compose(params.from, params.draft).await?;
+        self.send_email_with_identity(to, subject, body, in_reply_to, params, None)
+            .await
+    }
+
+    pub(crate) async fn send_email_with_identity(
+        &mut self,
+        to: Vec<EmailAddress>,
+        subject: &str,
+        body: &str,
+        in_reply_to: Option<&str>,
+        params: ComposeParams<'_>,
+        resolved_identity: Option<Result<Identity>>,
+    ) -> Result<String> {
+        let ctx = self
+            .prepare_compose(params.from, params.draft, resolved_identity)
+            .await?;
         self.create_and_submit_email(
             &ctx,
             EmailDraft {
@@ -1631,7 +1653,21 @@ impl JmapClient {
         to: Vec<EmailAddress>,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        let ctx = self.prepare_compose(params.from, params.draft).await?;
+        self.reply_email_with_identity(original, body, to, params, None)
+            .await
+    }
+
+    pub(crate) async fn reply_email_with_identity(
+        &mut self,
+        original: &Email,
+        body: &str,
+        to: Vec<EmailAddress>,
+        params: ComposeParams<'_>,
+        resolved_identity: Option<Result<Identity>>,
+    ) -> Result<String> {
+        let ctx = self
+            .prepare_compose(params.from, params.draft, resolved_identity)
+            .await?;
         let to_addrs = to;
         let cc_addrs = params.cc;
 
@@ -1678,7 +1714,21 @@ impl JmapClient {
         body: &str,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        let ctx = self.prepare_compose(params.from, params.draft).await?;
+        self.forward_email_with_identity(original, to, body, params, None)
+            .await
+    }
+
+    pub(crate) async fn forward_email_with_identity(
+        &mut self,
+        original: &Email,
+        to: Vec<EmailAddress>,
+        body: &str,
+        params: ComposeParams<'_>,
+        resolved_identity: Option<Result<Identity>>,
+    ) -> Result<String> {
+        let ctx = self
+            .prepare_compose(params.from, params.draft, resolved_identity)
+            .await?;
 
         let subject = prefixed_subject(original.subject.as_deref(), "Fwd:");
 

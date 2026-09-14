@@ -4,7 +4,7 @@ use async_graphql::{Context, Object, Result};
 
 use crate::carddav::{ContactEmail, ContactPhone};
 use crate::jmap::prefixed_subject;
-use crate::models::EmailAddress;
+use crate::models::{EmailAddress, Identity};
 use crate::util::parse_addresses;
 
 use super::types::*;
@@ -39,7 +39,8 @@ impl MutationRoot {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
-        let sender = client.resolve_sender(from.as_deref()).await;
+        let identity = client.resolve_sender(from.as_deref()).await;
+        let sender = identity.as_ref().ok();
         let binding = compose_binding(
             &client,
             "send",
@@ -55,7 +56,7 @@ impl MutationRoot {
             let nonce = super::types::issue_nonce(nonce_store, &params).await;
             let mut preview =
                 format_send_preview(&to_addrs, &cc_addrs, &bcc_addrs, &subject, &body);
-            append_compose_details(&mut preview, sender.as_ref(), html_body.as_deref());
+            append_compose_details(&mut preview, sender, html_body.as_deref());
             return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
@@ -67,7 +68,7 @@ impl MutationRoot {
 
         let draft = matches!(action, SendAction::Draft);
         match client
-            .send_email(
+            .send_email_with_identity(
                 to_addrs,
                 &subject,
                 &body,
@@ -75,14 +76,12 @@ impl MutationRoot {
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
                     bcc: bcc_addrs,
-                    // Pin the reviewed default if upstream identity ordering changes.
-                    from: from
-                        .as_deref()
-                        .or(sender.as_ref().map(|s| s.email.as_str())),
+                    from: from.as_deref(),
                     draft,
                     html_body,
                     attachments: vec![],
                 },
+                Some(identity),
             )
             .await
         {
@@ -125,8 +124,9 @@ impl MutationRoot {
         // (for display) and CONFIRM/DRAFT (for the actual send) use these
         // exact values — preview and send can't diverge because they share
         // the same variables, not the same code path.
-        let sender = client.resolve_sender(from.as_deref()).await;
-        let my_email = sender.as_ref().map(|s| s.email.as_str());
+        let identity = client.resolve_sender(from.as_deref()).await;
+        let sender = identity.as_ref().ok();
+        let my_email = sender.map(|s| s.email.as_str());
         let (to_addrs, cc_addrs) =
             crate::jmap::expand_reply_recipients(&original, reply_all, my_email, extra_cc);
 
@@ -159,7 +159,7 @@ impl MutationRoot {
                 in_reply_to,
                 body
             );
-            append_compose_details(&mut preview, sender.as_ref(), html_body.as_deref());
+            append_compose_details(&mut preview, sender, html_body.as_deref());
             return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
@@ -171,18 +171,19 @@ impl MutationRoot {
 
         let draft = matches!(action, SendAction::Draft);
         match client
-            .reply_email(
+            .reply_email_with_identity(
                 &original,
                 &body,
                 to_addrs,
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
                     bcc: bcc_addrs,
-                    from: from.as_deref().or(my_email),
+                    from: from.as_deref(),
                     draft,
                     html_body,
                     attachments: vec![],
                 },
+                Some(identity),
             )
             .await
         {
@@ -222,7 +223,8 @@ impl MutationRoot {
 
         let subject = prefixed_subject(original.subject.as_deref(), "Fwd:");
 
-        let sender = client.resolve_sender(from.as_deref()).await;
+        let identity = client.resolve_sender(from.as_deref()).await;
+        let sender = identity.as_ref().ok();
         let binding = compose_binding(
             &client,
             "forward",
@@ -254,7 +256,7 @@ impl MutationRoot {
                 original.subject.as_deref().unwrap_or(""),
                 original_body,
             );
-            append_compose_details(&mut preview, sender.as_ref(), html_body.as_deref());
+            append_compose_details(&mut preview, sender, html_body.as_deref());
             return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
@@ -266,20 +268,19 @@ impl MutationRoot {
 
         let draft = matches!(action, SendAction::Draft);
         match client
-            .forward_email(
+            .forward_email_with_identity(
                 &original,
                 to_addrs,
                 body_str,
                 crate::jmap::ComposeParams {
                     cc: cc_addrs,
                     bcc: bcc_addrs,
-                    from: from
-                        .as_deref()
-                        .or(sender.as_ref().map(|s| s.email.as_str())),
+                    from: from.as_deref(),
                     draft,
                     html_body,
                     attachments: vec![],
                 },
+                Some(identity),
             )
             .await
         {
@@ -552,9 +553,15 @@ fn compose_binding(
     }))?)
 }
 
-fn append_compose_details(preview: &mut String, sender: Option<&EmailAddress>, html: Option<&str>) {
+fn append_compose_details(preview: &mut String, sender: Option<&Identity>, html: Option<&str>) {
     let sender = sender
-        .map(|s| s.to_string())
+        .map(|s| {
+            EmailAddress {
+                email: s.email.clone(),
+                name: Some(s.name.clone()),
+            }
+            .to_string()
+        })
         .unwrap_or_else(|| "(unresolved)".into());
     preview.push_str(&format!("\nFrom: {sender}"));
     if let Some(html) = html {

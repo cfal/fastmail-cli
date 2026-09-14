@@ -17,9 +17,9 @@
 - Reject malformed, multiple, and literal or quoted wildcard senders locally.
   An explicit sender must resolve successfully before creating mail, including
   drafts. Drafts without `--from` can still be saved when identity lookup fails.
-- Include sender names in GraphQL previews and confirmation bindings, preserve
-  the reviewed default when upstream identities are reordered, and exclude the
-  concrete sender from reply-all recipients.
+- Include sender names and identity IDs in GraphQL confirmation bindings. Use
+  the reviewed identity without reselecting it during execution, even when
+  identities share an address. Exclude the concrete sender from reply-all recipients.
 - Expand coverage for identity selection, per-message names across all compose
   paths, confirmation binding, and rejected sends without account mutations.
 - Live smoke testing verified domain-wide delivery and the display name in the

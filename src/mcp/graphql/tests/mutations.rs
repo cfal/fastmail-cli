@@ -195,7 +195,10 @@ async fn compose_server() -> MockServer {
 async fn compose_pins_the_reviewed_default_when_identity_order_changes() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    for field in ["sendEmail", "replyToEmail", "forwardEmail"] {
+    for (field, other_email) in ["sendEmail", "replyToEmail", "forwardEmail"]
+        .into_iter()
+        .flat_map(|field| ["me@example.com", "other@example.com"].map(|email| (field, email)))
+    {
         let server = compose_server().await;
         let lookups = Arc::new(AtomicUsize::new(0));
         let counter = lookups.clone();
@@ -203,7 +206,7 @@ async fn compose_pins_the_reviewed_default_when_identity_order_changes() {
             .respond_with(move |_: &wiremock::Request| {
                 let mut identities = vec![
                     json!({"id":"id1", "name":"Me", "email":"me@example.com"}),
-                    json!({"id":"other", "name":"Other", "email":"other@example.com"}),
+                    json!({"id":"other", "name":"Other", "email":other_email}),
                 ];
                 if counter.fetch_add(1, Ordering::SeqCst) >= 2 {
                     identities.reverse();
@@ -213,7 +216,7 @@ async fn compose_pins_the_reviewed_default_when_identity_order_changes() {
                 ]]}))
             })
             .with_priority(1)
-            .expect(3)
+            .expect(2)
             .mount(&server)
             .await;
         let schema = build_schema();
@@ -244,7 +247,7 @@ async fn compose_pins_the_reviewed_default_when_identity_order_changes() {
         )
         .await;
         assert_eq!(result["success"], true, "{result}");
-        assert_eq!(lookups.load(Ordering::SeqCst), 3);
+        assert_eq!(lookups.load(Ordering::SeqCst), 2);
         let mut creates = 0;
         for req in server.received_requests().await.unwrap() {
             let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -262,6 +265,134 @@ async fn compose_pins_the_reviewed_default_when_identity_order_changes() {
             }
         }
         assert_eq!(creates, 1);
+    }
+}
+
+#[tokio::test]
+async fn compose_confirmation_rejects_changed_identity_fields() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for (field, changed_key) in ["sendEmail", "replyToEmail", "forwardEmail"]
+        .into_iter()
+        .flat_map(|field| ["id", "name", "email"].map(|key| (field, key)))
+    {
+        let server = compose_server().await;
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let counter = lookups.clone();
+        Mock::given(wiremock::matchers::body_string_contains("Identity/get"))
+            .respond_with(move |_: &wiremock::Request| {
+                let mut identity = json!({"id":"id1", "name":"Me", "email":"me@example.com"});
+                if counter.fetch_add(1, Ordering::SeqCst) > 0 {
+                    identity[changed_key] = json!("other@example.com");
+                }
+                ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                    "Identity/get", {"list":[identity]}, "i0"
+                ]]}))
+            })
+            .with_priority(1)
+            .expect(2)
+            .mount(&server)
+            .await;
+        let schema = build_schema();
+        let client = client_for(&server);
+        let mut params = json!({"body":"Body"});
+        if field == "sendEmail" {
+            params["subject"] = json!("Subject");
+        } else {
+            params["emailId"] = json!("e0");
+        }
+        if field != "replyToEmail" {
+            params["to"] = json!("to@example.com");
+        }
+        let preview = compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+        let result = compose(
+            &schema,
+            client,
+            field,
+            "CONFIRM",
+            &params,
+            preview["confirmationToken"].as_str(),
+        )
+        .await;
+        assert_eq!(result["success"], false, "{field}.{changed_key}: {result}");
+        assert!(result["error"].as_str().unwrap().contains("Params changed"));
+        assert_eq!(lookups.load(Ordering::SeqCst), 2);
+        assert!(
+            !calls(&server)
+                .await
+                .iter()
+                .any(|call| call.method.contains("/set"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn compose_drafts_retain_failed_identity_resolution_without_retrying() {
+    for field in ["sendEmail", "replyToEmail", "forwardEmail"] {
+        for status in [200, 503] {
+            for from in [None, Some("me@example.com")] {
+                let server = compose_server().await;
+                Mock::given(wiremock::matchers::body_string_contains("Identity/get"))
+                    .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                        "methodResponses":[["Identity/get", {"list":[]}, "i0"]]
+                    })))
+                    .with_priority(1)
+                    .expect(2)
+                    .mount(&server)
+                    .await;
+                let schema = build_schema();
+                let client = client_for(&server);
+                let mut params = json!({"body":"Body"});
+                if field == "sendEmail" {
+                    params["subject"] = json!("Subject");
+                } else {
+                    params["emailId"] = json!("e0");
+                }
+                if field != "replyToEmail" {
+                    params["to"] = json!("to@example.com");
+                }
+                if let Some(from) = from {
+                    params["from"] = json!(from);
+                }
+                let preview =
+                    compose(&schema, client.clone(), field, "PREVIEW", &params, None).await;
+                assert!(
+                    preview["preview"]
+                        .as_str()
+                        .unwrap()
+                        .contains("From: (unresolved)")
+                );
+                let result = compose(
+                    &schema,
+                    client,
+                    field,
+                    "DRAFT",
+                    &params,
+                    preview["confirmationToken"].as_str(),
+                )
+                .await;
+                assert_eq!(
+                    result["success"],
+                    from.is_none(),
+                    "{field}/{status}: {result}"
+                );
+                let mut creates = 0;
+                for req in server.received_requests().await.unwrap() {
+                    let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                    for call in body["methodCalls"].as_array().into_iter().flatten() {
+                        assert_ne!(call[0], "EmailSubmission/set");
+                        if call[0] == "Email/set" {
+                            creates += 1;
+                            let email = &call[1]["create"]["email"];
+                            assert!(email.get("from").is_none());
+                            assert_eq!(email["mailboxIds"], json!({"drafts":true}));
+                            assert_eq!(email["keywords"]["$draft"], true);
+                        }
+                    }
+                }
+                assert_eq!(creates, usize::from(from.is_none()));
+            }
+        }
     }
 }
 

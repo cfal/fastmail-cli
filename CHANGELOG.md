@@ -16,7 +16,8 @@
 - Never choose a wildcard address as the default sender. Reject invalid explicit
   senders before creating mail. Explicit senders must resolve successfully even
   for drafts, including when identity lookup is unavailable.
-- Keep resolved sender names in GraphQL confirmation previews and bindings.
+- Pin the full resolved sender identity through GraphQL confirmation and
+  execution, including when multiple identities share the same address.
 
 ## [4.0.2] - 2026-09-14
 
