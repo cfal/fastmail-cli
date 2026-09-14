@@ -122,26 +122,15 @@ pub async fn extract_text(bytes: &[u8], filename: &str) -> anyhow::Result<Option
 
 /// Check if filename has an image extension (used to skip xberg for images)
 fn is_image_extension(filename: &str) -> bool {
-    let ext = Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
     matches!(
-        ext.as_str(),
+        lowercase_extension(filename).as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" | "svg" | "heic"
     )
 }
 
 /// Infer MIME type from filename extension for documents
 pub fn mime_from_filename(filename: &str) -> String {
-    let ext = Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    match ext.as_str() {
+    match lowercase_extension(filename).as_str() {
         // Documents
         "pdf" => "application/pdf",
         "doc" => "application/msword",
@@ -235,24 +224,15 @@ pub fn is_image(content_type: &str, filename: &str) -> bool {
     if content_type.starts_with("image/") {
         return true;
     }
-    let ext = Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
     matches!(
-        ext.as_str(),
+        lowercase_extension(filename).as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" | "heic"
     )
 }
 
 /// Infer MIME type from filename extension (JMAP often returns application/octet-stream)
 pub fn infer_image_mime(filename: &str) -> Option<&'static str> {
-    let ext = Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())?
-        .to_lowercase();
-    match ext.as_str() {
+    match lowercase_extension(filename).as_str() {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
         "gif" => Some("image/gif"),
@@ -261,6 +241,14 @@ pub fn infer_image_mime(filename: &str) -> Option<&'static str> {
         "tiff" | "tif" => Some("image/tiff"),
         _ => None,
     }
+}
+
+fn lowercase_extension(filename: &str) -> String {
+    Path::new(filename)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_lowercase()
 }
 
 /// Default max size for MCP (Claude's ~1MB base64 limit means raw < 700KB)
@@ -492,6 +480,28 @@ pub fn resolve_html(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_classifiers_keep_their_distinct_supported_formats() {
+        for (filename, extraction_image, image, inferred, mime) in [
+            ("vector.SVG", true, false, None, "image/svg+xml"),
+            (
+                "photo.JPEG",
+                true,
+                true,
+                Some("image/jpeg"),
+                "application/octet-stream",
+            ),
+            ("photo.HEIC", true, true, None, "application/octet-stream"),
+            ("README", false, false, None, "application/octet-stream"),
+            (".png", false, false, None, "application/octet-stream"),
+        ] {
+            assert_eq!(is_image_extension(filename), extraction_image);
+            assert_eq!(is_image("application/octet-stream", filename), image);
+            assert_eq!(infer_image_mime(filename), inferred);
+            assert_eq!(mime_from_filename(filename), mime);
+        }
+    }
 
     #[test]
     fn http_connections_are_reused_within_but_not_between_runtimes() {
