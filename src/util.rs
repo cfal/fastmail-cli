@@ -285,6 +285,10 @@ pub fn resize_image(
     if data.len() <= max_bytes {
         return Ok((data.to_vec(), content_type.to_string()));
     }
+    // Even the fixed headers of the JPEG encoder exceed this budget.
+    if max_bytes < 512 {
+        return Err("Image resizing byte limit must be at least 512 bytes".into());
+    }
 
     // Determine format
     let format = match content_type {
@@ -302,7 +306,7 @@ pub fn resize_image(
     limits.max_image_height = Some(16_384);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let img = reader
+    let mut img = reader
         .decode()
         .map_err(|e| format!("Failed to load image: {}", e))?;
 
@@ -311,7 +315,7 @@ pub fn resize_image(
     let scale = (max_bytes as f64 / data.len() as f64).sqrt();
     let mut new_width = ((width as f64 * scale) as u32).max(1);
     let mut new_height = ((height as f64 * scale) as u32).max(1);
-    loop {
+    for _ in 0..4 {
         let resized = img
             .resize(new_width, new_height, image::imageops::FilterType::Lanczos3)
             .to_rgb8();
@@ -323,11 +327,17 @@ pub fn resize_image(
             return Ok((output, "image/jpeg".to_string()));
         }
         if new_width == 1 && new_height == 1 {
-            return Err(format!("Cannot encode an image within {max_bytes} bytes"));
+            break;
         }
-        new_width = (new_width / 2).max(1);
-        new_height = (new_height / 2).max(1);
+        let scale = (max_bytes as f64 / output.len() as f64).sqrt() * 0.9;
+        new_width = ((resized.width() as f64 * scale) as u32).max(1);
+        new_height = ((resized.height() as f64 * scale) as u32).max(1);
+        // Later attempts operate on the reduced image, never the full source.
+        img = image::DynamicImage::ImageRgb8(resized);
     }
+    Err(format!(
+        "Cannot encode an image within {max_bytes} bytes after bounded resizing"
+    ))
 }
 
 /// Sanitize an attachment filename so it's safe to use as a path component.
@@ -482,6 +492,13 @@ mod tests {
         assert!(image::load_from_memory(&resized).is_ok());
         assert!(resize_image(&data, "image/png", 1).is_err());
         assert!(resize_image(&data, "image/png", 0).is_err());
+        assert!(resize_image(&data, "image/png", 512).is_err());
+    }
+
+    #[test]
+    fn impossible_resize_budget_is_rejected_before_decoding() {
+        let error = resize_image(&[0; 512], "image/png", 511).unwrap_err();
+        assert!(error.contains("at least 512"), "{error}");
     }
     use std::io::Write;
 
@@ -530,7 +547,8 @@ mod tests {
                 image::ImageFormat::Png,
             )
             .unwrap();
-        let error = resize_image(&image, "image/png", 1).unwrap_err();
+        image.resize(image.len().max(1024), 0);
+        let error = resize_image(&image, "image/png", 512).unwrap_err();
         assert!(error.contains("limit"), "{error}");
     }
 

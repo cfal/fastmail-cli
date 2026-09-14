@@ -30,7 +30,9 @@ files, text extraction and user confirmations remain on the client.
 
 HTTP JSON requests are limited to 2 MiB; attachment uploads and buffered upstream
 responses to 64 MiB. Image decoding is limited to 16,384 pixels per dimension
-and a 128 MiB allocation budget. SSE frames are limited to 1 MiB. GraphQL has a
+and a 128 MiB allocation budget. Image conversion rejects budgets below 512 bytes
+and stops after at most four resize passes, reusing reduced images. SSE frames are
+limited to 1 MiB. GraphQL has a
 depth limit of 15 and a complexity budget of 100,000; reduce page sizes for
 attachment-heavy queries. Before parsing, query documents are limited to 64 KiB
 and 32 levels of syntax nesting, including input values. Before recursive
