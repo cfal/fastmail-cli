@@ -26,9 +26,17 @@
   distinct-connection `graphql-sse` protocol (`next`/`complete` events). Subscriber
   reconnects are explicitly non-resumable; the IDE does not silently reconnect.
 - Reuse HTTP transports and handle construction failures in first-party server
-  paths. Preserve the existing infallible Rust constructors for compatibility.
+  paths. Scope pooled connections to Tokio runtime lifetimes so separate runtime
+  owners cannot lose each other's in-flight requests. Preserve the existing
+  infallible Rust constructors for compatibility.
 - Refresh agent references, document Basic-auth rate-limiting requirements, and
   make the dependency reachability guard fail closed when its search fails.
+
+### Changed
+
+- Simplify CLI dispatch, CardDAV parsing, JMAP request/error construction,
+  GraphQL results and pagination, and shared input/subject helpers without
+  changing public interfaces or command output.
 
 Authentication remains optional. No malicious code was identified in the reviewed
 first-party source or targeted dependencies; the existing documented dependency

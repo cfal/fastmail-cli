@@ -26,12 +26,15 @@ reviews. No deliberately malicious code was identified in the reviewed scope.
   Drafts and patch read flags without replacing unrelated keywords.
 - Fix cold session health, pageInfo-only cursors, remote error messages/classification
   and attachment filename collisions. Report skipped images while continuing other
-  downloads. Reuse HTTP transports without sharing credentials.
+  downloads. Reuse HTTP transports without sharing credentials or connections
+  across independent Tokio runtime lifetimes.
 - GraphiQL subscriptions now use `/graphql/stream` with `graphql-sse`
   `next`/`complete` events. Downstream reconnects are not resumable; query for
   mail received during a disconnect. The IDE surfaces disconnects rather than
   silently starting a new subscription.
 - Refresh agent references and restore the missing v4.0.0 changelog entry.
+- Simplify shared command, contact, compose, request and GraphQL logic while
+  preserving public interfaces, command output and security limits.
 
 No vendoring or new authentication requirement. Existing time-limited `lru` and
 `paste` dependency dispositions remain documented in `SECURITY.md`.
