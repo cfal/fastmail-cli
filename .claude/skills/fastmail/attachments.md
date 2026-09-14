@@ -37,8 +37,10 @@ fastmail download abc123 --max-size 800K -o ~/Downloads
 
 **`raw`** (default): Saves attachment files to disk, resizing images when
 `--max-size` is set. Existing files are never overwritten; filename collisions
-receive numeric suffixes. Invalid size values and impossible image limits fail
-instead of silently ignoring the limit.
+receive numeric suffixes. Invalid size values fail immediately. Images that cannot
+be resized are skipped rather than exceeding the limit; other downloads continue.
+Partial results set `success: false`, list written paths in `data.files`, and report
+skipped filenames and errors in `data.skipped`.
 
 **`json`**: Extracts document text using `xberg`, including PDF, DOCX and XLSX.
 Each result has `filename`, `content_type`, `size` and `text` fields. Images are

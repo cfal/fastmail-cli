@@ -338,6 +338,10 @@ fastmail download EMAIL_ID --format json
 fastmail download EMAIL_ID --max-size 500K
 ```
 
+Images that cannot be resized within the limit are skipped while other attachments
+continue. Partial results have `success: false`, written paths in `data.files`, and
+filenames/errors in `data.skipped`; oversized originals are never written as a fallback.
+
 Text extraction uses [xberg](https://github.com/xberg-io/xberg), including these document formats:
 
 - **Documents**: PDF, DOC, DOCX, ODT, RTF

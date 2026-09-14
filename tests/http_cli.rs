@@ -89,6 +89,58 @@ fn command(server: &MockServer, home: &std::path::Path) -> Command {
 }
 
 #[tokio::test]
+async fn unsupported_images_are_reported_without_losing_other_downloads() {
+    use wiremock::matchers::query_param;
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/cli/v1/jmap"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/get", {"list":[{"id":"e1","attachments":[
+                    {"blobId":"tiff","name":"scan.tiff","type":"image/tiff"},
+                    {"blobId":"png","name":"corrupt.png","type":"image/png"},
+                    {"blobId":"text","name":"notes.txt","type":"text/plain"}
+                ]}]}, "g0"
+            ]]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    for blob in ["tiff", "png"] {
+        Mock::given(method("GET"))
+            .and(path("/cli/v1/download"))
+            .and(query_param("blob_id", blob))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0; 1025]))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = command(&server, home.path())
+        .args([
+            "download",
+            "e1",
+            "--max-size",
+            "1K",
+            "--output",
+            home.path().to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["success"], false);
+    assert_eq!(result["data"]["skipped"].as_array().unwrap().len(), 2);
+    assert_eq!(result["data"]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read(home.path().join("notes.txt")).unwrap(),
+        b"attachment"
+    );
+    assert!(!home.path().join("scan.tiff").exists());
+    assert!(!home.path().join("corrupt.png").exists());
+}
+
+#[tokio::test]
 async fn mail_and_contact_commands_use_http_without_local_credentials() {
     let server = server().await;
     let home = tempfile::tempdir().unwrap();

@@ -61,6 +61,7 @@ pub async fn download_attachment(
     // Default: download to files
     let out_dir = output_dir.unwrap_or(".");
     let mut downloaded: Vec<String> = Vec::new();
+    let mut skipped = Vec::new();
 
     for attachment in attachments.unwrap() {
         let blob_id = match &attachment.blob_id {
@@ -106,7 +107,12 @@ pub async fn download_attachment(
                         (resized, new_filename)
                     }
                     Err(message) => {
-                        return Err(anyhow::anyhow!("Cannot resize {filename}: {message}"));
+                        eprintln!("Skipping {filename}: {message}");
+                        skipped.push(DownloadFailure {
+                            filename,
+                            error: message,
+                        });
+                        continue;
                     }
                 }
             } else {
@@ -125,11 +131,28 @@ pub async fn download_attachment(
     #[derive(serde::Serialize)]
     struct DownloadResponse {
         files: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<DownloadFailure>,
     }
 
-    Output::success(DownloadResponse { files: downloaded }).print();
+    let incomplete = !skipped.is_empty();
+    let mut output = Output::success(DownloadResponse {
+        files: downloaded,
+        skipped,
+    });
+    if incomplete {
+        output.success = false;
+        output.error = Some("Some images could not be resized; see data.skipped".into());
+    }
+    output.print();
 
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct DownloadFailure {
+    filename: String,
+    error: String,
 }
 
 fn create_attachment_file(dir: &Path, filename: &str) -> std::io::Result<(std::fs::File, PathBuf)> {
