@@ -897,6 +897,38 @@ pub struct GqlComposeResult {
     pub error: Option<String>,
 }
 
+impl GqlComposeResult {
+    pub(super) fn previewed(preview: String, confirmation_token: String) -> Self {
+        Self {
+            success: true,
+            email_id: None,
+            preview: Some(preview),
+            confirmation_token: Some(confirmation_token),
+            error: None,
+        }
+    }
+
+    pub(super) fn completed(email_id: String) -> Self {
+        Self {
+            success: true,
+            email_id: Some(email_id),
+            preview: None,
+            confirmation_token: None,
+            error: None,
+        }
+    }
+
+    pub(super) fn failed(error: String) -> Self {
+        Self {
+            success: false,
+            email_id: None,
+            preview: None,
+            confirmation_token: None,
+            error: Some(error),
+        }
+    }
+}
+
 /// A pending confirmation nonce: fingerprint of the compose params, plus
 /// the monotonic instant it was issued at so we can expire it.
 pub struct Nonce {
@@ -1003,6 +1035,26 @@ pub struct GqlStatus {
     pub confirmation_token: Option<String>,
 }
 
+impl GqlStatus {
+    pub(super) fn completed(message: String) -> Self {
+        Self {
+            success: true,
+            message: Some(message),
+            error: None,
+            confirmation_token: None,
+        }
+    }
+
+    pub(super) fn failed(error: String) -> Self {
+        Self {
+            success: false,
+            message: None,
+            error: Some(error),
+            confirmation_token: None,
+        }
+    }
+}
+
 /// A conversation: every email sharing a thread ID, oldest first. Each email is
 /// fully fetched, so bodies and attachment metadata are already present.
 pub struct GqlThread {
@@ -1074,6 +1126,59 @@ impl GqlThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compose_result_states_keep_their_exact_fields() {
+        for (result, expected) in [
+            (
+                GqlComposeResult::previewed("preview".into(), "nonce".into()),
+                (true, None, Some("preview"), Some("nonce"), None),
+            ),
+            (
+                GqlComposeResult::completed("email-id".into()),
+                (true, Some("email-id"), None, None, None),
+            ),
+            (
+                GqlComposeResult::failed("failure".into()),
+                (false, None, None, None, Some("failure")),
+            ),
+        ] {
+            assert_eq!(
+                (
+                    result.success,
+                    result.email_id.as_deref(),
+                    result.preview.as_deref(),
+                    result.confirmation_token.as_deref(),
+                    result.error.as_deref(),
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn status_result_states_keep_their_exact_fields() {
+        for (result, expected) in [
+            (
+                GqlStatus::completed("done".into()),
+                (true, Some("done"), None),
+            ),
+            (
+                GqlStatus::failed("failure".into()),
+                (false, None, Some("failure")),
+            ),
+        ] {
+            assert_eq!(
+                (
+                    result.success,
+                    result.message.as_deref(),
+                    result.error.as_deref()
+                ),
+                expected,
+            );
+            assert!(result.confirmation_token.is_none());
+        }
+    }
     use tokio::sync::Mutex;
 
     fn fresh_store() -> NonceStore {

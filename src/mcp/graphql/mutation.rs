@@ -54,25 +54,13 @@ impl MutationRoot {
             let mut preview =
                 format_send_preview(&to_addrs, &cc_addrs, &bcc_addrs, &subject, &body);
             append_compose_details(&mut preview, sender.as_deref(), html_body.as_deref());
-            return Ok(GqlComposeResult {
-                success: true,
-                email_id: None,
-                preview: Some(preview),
-                confirmation_token: Some(nonce),
-                error: None,
-            });
+            return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
         if let Err(msg) =
             super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
         {
-            return Ok(GqlComposeResult {
-                success: false,
-                email_id: None,
-                preview: None,
-                confirmation_token: None,
-                error: Some(msg.to_string()),
-            });
+            return Ok(GqlComposeResult::failed(msg.to_string()));
         }
 
         let draft = matches!(action, SendAction::Draft);
@@ -93,20 +81,8 @@ impl MutationRoot {
             )
             .await
         {
-            Ok(email_id) => Ok(GqlComposeResult {
-                success: true,
-                email_id: Some(email_id),
-                preview: None,
-                confirmation_token: None,
-                error: None,
-            }),
-            Err(e) => Ok(GqlComposeResult {
-                success: false,
-                email_id: None,
-                preview: None,
-                confirmation_token: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(email_id) => Ok(GqlComposeResult::completed(email_id)),
+            Err(e) => Ok(GqlComposeResult::failed(e.to_string())),
         }
     }
 
@@ -182,40 +158,20 @@ impl MutationRoot {
             let mut preview = format!(
                 "REPLY PREVIEW:\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\nIn-Reply-To: {}\n\n--- Your Reply ---\n{}",
                 format_addrs(&to_addrs),
-                if cc_addrs.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    format_addrs(&cc_addrs)
-                },
-                if bcc_addrs.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    format_addrs(&bcc_addrs)
-                },
+                format_addrs(&cc_addrs),
+                format_addrs(&bcc_addrs),
                 subject,
                 in_reply_to,
                 body
             );
             append_compose_details(&mut preview, my_email.as_deref(), html_body.as_deref());
-            return Ok(GqlComposeResult {
-                success: true,
-                email_id: None,
-                preview: Some(preview),
-                confirmation_token: Some(nonce),
-                error: None,
-            });
+            return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
         if let Err(msg) =
             super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
         {
-            return Ok(GqlComposeResult {
-                success: false,
-                email_id: None,
-                preview: None,
-                confirmation_token: None,
-                error: Some(msg.to_string()),
-            });
+            return Ok(GqlComposeResult::failed(msg.to_string()));
         }
 
         let draft = matches!(action, SendAction::Draft);
@@ -235,20 +191,8 @@ impl MutationRoot {
             )
             .await
         {
-            Ok(eid) => Ok(GqlComposeResult {
-                success: true,
-                email_id: Some(eid),
-                preview: None,
-                confirmation_token: None,
-                error: None,
-            }),
-            Err(e) => Ok(GqlComposeResult {
-                success: false,
-                email_id: None,
-                preview: None,
-                confirmation_token: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(email_id) => Ok(GqlComposeResult::completed(email_id)),
+            Err(e) => Ok(GqlComposeResult::failed(e.to_string())),
         }
     }
 
@@ -312,16 +256,8 @@ impl MutationRoot {
             let mut preview = format!(
                 "FORWARD PREVIEW:\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\nForwarding from: {}\n\n--- Your Message ---\n{}\n\n--- Forwarded ---\nFrom: {}\nDate: {}\nSubject: {}\n\n{}",
                 format_addrs(&to_addrs),
-                if cc_addrs.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    format_addrs(&cc_addrs)
-                },
-                if bcc_addrs.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    format_addrs(&bcc_addrs)
-                },
+                format_addrs(&cc_addrs),
+                format_addrs(&bcc_addrs),
                 subject,
                 original_sender,
                 body_str,
@@ -331,25 +267,13 @@ impl MutationRoot {
                 original_body,
             );
             append_compose_details(&mut preview, sender.as_deref(), html_body.as_deref());
-            return Ok(GqlComposeResult {
-                success: true,
-                email_id: None,
-                preview: Some(preview),
-                confirmation_token: Some(nonce),
-                error: None,
-            });
+            return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
         if let Err(msg) =
             super::types::consume_nonce(nonce_store, confirmation_token.as_deref(), &params).await
         {
-            return Ok(GqlComposeResult {
-                success: false,
-                email_id: None,
-                preview: None,
-                confirmation_token: None,
-                error: Some(msg.to_string()),
-            });
+            return Ok(GqlComposeResult::failed(msg.to_string()));
         }
 
         let draft = matches!(action, SendAction::Draft);
@@ -369,20 +293,8 @@ impl MutationRoot {
             )
             .await
         {
-            Ok(eid) => Ok(GqlComposeResult {
-                success: true,
-                email_id: Some(eid),
-                preview: None,
-                confirmation_token: None,
-                error: None,
-            }),
-            Err(e) => Ok(GqlComposeResult {
-                success: false,
-                email_id: None,
-                preview: None,
-                confirmation_token: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(email_id) => Ok(GqlComposeResult::completed(email_id)),
+            Err(e) => Ok(GqlComposeResult::failed(e.to_string())),
         }
     }
 
@@ -401,22 +313,12 @@ impl MutationRoot {
         let target = client.find_mailbox(&target_mailbox).await?;
 
         match client.move_email(&email_id, &target.id).await {
-            Ok(()) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: true,
-                message: Some(format!(
-                    "Moved \"{}\" to {}",
-                    email.subject.as_deref().unwrap_or("(no subject)"),
-                    target.name
-                )),
-                error: None,
-            }),
-            Err(e) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: false,
-                message: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(()) => Ok(GqlStatus::completed(format!(
+                "Moved \"{}\" to {}",
+                email.subject.as_deref().unwrap_or("(no subject)"),
+                target.name
+            ))),
+            Err(e) => Ok(GqlStatus::failed(e.to_string())),
         }
     }
 
@@ -437,22 +339,12 @@ impl MutationRoot {
         match client.mark_read(&email_id, read).await {
             Ok(()) => {
                 let status = if read { "read" } else { "unread" };
-                Ok(GqlStatus {
-                    confirmation_token: None,
-                    success: true,
-                    message: Some(format!(
-                        "Marked \"{}\" as {status}",
-                        email.subject.as_deref().unwrap_or("(no subject)")
-                    )),
-                    error: None,
-                })
+                Ok(GqlStatus::completed(format!(
+                    "Marked \"{}\" as {status}",
+                    email.subject.as_deref().unwrap_or("(no subject)")
+                )))
             }
-            Err(e) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: false,
-                message: None,
-                error: Some(e.to_string()),
-            }),
+            Err(e) => Ok(GqlStatus::failed(e.to_string())),
         }
     }
 
@@ -478,12 +370,7 @@ impl MutationRoot {
             && let Err(error) =
                 super::types::consume_nonce(store, confirmation_token.as_deref(), &params).await
         {
-            return Ok(GqlStatus {
-                success: false,
-                message: None,
-                error: Some(error.into()),
-                confirmation_token: None,
-            });
+            return Ok(GqlStatus::failed(error.into()));
         }
         let email = client.get_email(&email_id).await?;
 
@@ -507,21 +394,11 @@ impl MutationRoot {
         }
 
         match client.mark_spam(&email_id).await {
-            Ok(()) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: true,
-                message: Some(format!(
-                    "Marked as spam: \"{}\"",
-                    email.subject.as_deref().unwrap_or("(no subject)")
-                )),
-                error: None,
-            }),
-            Err(e) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: false,
-                message: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(()) => Ok(GqlStatus::completed(format!(
+                "Marked as spam: \"{}\"",
+                email.subject.as_deref().unwrap_or("(no subject)")
+            ))),
+            Err(e) => Ok(GqlStatus::failed(e.to_string())),
         }
     }
 
@@ -557,18 +434,8 @@ impl MutationRoot {
             .update_masked_email(&id, Some("enabled"), None, None)
             .await
         {
-            Ok(()) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: true,
-                message: Some(format!("Masked email {id} enabled.")),
-                error: None,
-            }),
-            Err(e) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: false,
-                message: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(()) => Ok(GqlStatus::completed(format!("Masked email {id} enabled."))),
+            Err(e) => Ok(GqlStatus::failed(e.to_string())),
         }
     }
 
@@ -584,18 +451,8 @@ impl MutationRoot {
             .update_masked_email(&id, Some("disabled"), None, None)
             .await
         {
-            Ok(()) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: true,
-                message: Some(format!("Masked email {id} disabled.")),
-                error: None,
-            }),
-            Err(e) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: false,
-                message: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(()) => Ok(GqlStatus::completed(format!("Masked email {id} disabled."))),
+            Err(e) => Ok(GqlStatus::failed(e.to_string())),
         }
     }
 
@@ -611,18 +468,8 @@ impl MutationRoot {
             .update_masked_email(&id, Some("deleted"), None, None)
             .await
         {
-            Ok(()) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: true,
-                message: Some(format!("Masked email {id} deleted.")),
-                error: None,
-            }),
-            Err(e) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: false,
-                message: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(()) => Ok(GqlStatus::completed(format!("Masked email {id} deleted."))),
+            Err(e) => Ok(GqlStatus::failed(e.to_string())),
         }
     }
 
@@ -694,18 +541,8 @@ impl MutationRoot {
     ) -> Result<GqlStatus> {
         let client = ctx.data::<super::CardDavCreds>()?.client()?;
         match client.delete_contact(&id).await {
-            Ok(()) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: true,
-                message: Some(format!("Contact {id} deleted.")),
-                error: None,
-            }),
-            Err(e) => Ok(GqlStatus {
-                confirmation_token: None,
-                success: false,
-                message: None,
-                error: Some(e.to_string()),
-            }),
+            Ok(()) => Ok(GqlStatus::completed(format!("Contact {id} deleted."))),
+            Err(e) => Ok(GqlStatus::failed(e.to_string())),
         }
     }
 }
@@ -754,17 +591,28 @@ fn format_send_preview(
     format!(
         "EMAIL PREVIEW:\nTo: {}\nCC: {}\nBCC: {}\nSubject: {}\n\n--- Body ---\n{}\n\nTo send: use action=CONFIRM. To save draft: use action=DRAFT.",
         format_addrs(to),
-        if cc.is_empty() {
-            "(none)".to_string()
-        } else {
-            format_addrs(cc)
-        },
-        if bcc.is_empty() {
-            "(none)".to_string()
-        } else {
-            format_addrs(bcc)
-        },
+        format_addrs(cc),
+        format_addrs(bcc),
         subject,
         body
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_preview_preserves_empty_recipient_labels() {
+        assert_eq!(
+            format_send_preview(
+                &parse_addresses("Name <to@example.com>"),
+                &[],
+                &[],
+                "Subject",
+                "Body"
+            ),
+            "EMAIL PREVIEW:\nTo: Name <to@example.com>\nCC: (none)\nBCC: (none)\nSubject: Subject\n\n--- Body ---\nBody\n\nTo send: use action=CONFIRM. To save draft: use action=DRAFT.",
+        );
+    }
 }
