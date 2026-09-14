@@ -268,23 +268,22 @@ pub(crate) fn convert_addrs(addrs: Option<Vec<EmailAddress>>) -> Vec<GqlEmailAdd
 pub(crate) fn attachments_of(email: &Email) -> Vec<GqlAttachment> {
     email
         .attachments
-        .as_ref()
-        .map(|atts| {
-            atts.iter()
-                .filter(|a| a.blob_id.is_some())
-                .map(|a| GqlAttachment {
-                    blob_id: a.blob_id.clone().unwrap_or_default(),
-                    name: a.name.clone(),
-                    content_type: a.content_type.clone(),
-                    size: a.size,
-                    disposition: a.disposition.clone(),
-                    cid: a.cid.clone(),
-                    charset: a.charset.clone(),
-                    part_id: a.part_id.clone(),
-                })
-                .collect()
-        })
+        .as_deref()
         .unwrap_or_default()
+        .iter()
+        .filter_map(|attachment| {
+            Some(GqlAttachment {
+                blob_id: attachment.blob_id.clone()?,
+                name: attachment.name.clone(),
+                content_type: attachment.content_type.clone(),
+                size: attachment.size,
+                disposition: attachment.disposition.clone(),
+                cid: attachment.cid.clone(),
+                charset: attachment.charset.clone(),
+                part_id: attachment.part_id.clone(),
+            })
+        })
+        .collect()
 }
 
 /// An email.

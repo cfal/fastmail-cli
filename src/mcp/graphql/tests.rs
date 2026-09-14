@@ -722,17 +722,25 @@ async fn list_connections_page_backwards() {
 #[tokio::test]
 async fn conflicting_page_args_are_rejected() {
     let server = mock_server(3).await;
-    for args in ["first: 1, last: 1", "after: \"e0\", before: \"e2\""] {
-        let resp = run(
-            &server,
-            &format!("{{ thread(emailId: \"e0\") {{ emails({args}) {{ nodes {{ id }} }} }} }}"),
-        )
-        .await;
-        assert!(
-            resp.errors.iter().any(|e| e.message.contains("not both")),
-            "expected a rejection for `{args}`, got {:?}",
-            resp.errors
-        );
+    for (args, expected) in [
+        ("first: 1, last: 1", "Pass `first` or `last`, not both."),
+        (
+            "after: \"e0\", before: \"e2\"",
+            "Pass `after` or `before`, not both.",
+        ),
+        (
+            "first: 1, last: 1, after: \"e0\", before: \"e2\"",
+            "Pass `first` or `last`, not both.",
+        ),
+    ] {
+        for query in [
+            format!("{{ thread(emailId: \"e0\") {{ emails({args}) {{ nodes {{ id }} }} }} }}"),
+            format!("{{ emails({args}) {{ nodes {{ id }} }} }}"),
+        ] {
+            let resp = run(&server, &query).await;
+            assert_eq!(resp.errors.len(), 1, "{:?}", resp.errors);
+            assert_eq!(resp.errors[0].message, expected);
+        }
     }
 }
 

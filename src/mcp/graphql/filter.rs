@@ -342,45 +342,10 @@ mod tests {
     }
 
     fn filter(json: Value) -> EmailFilter {
-        // Build via the same path GraphQL would, so the test exercises the real
-        // field names rather than Rust struct literals.
-        serde_json::from_value::<Raw>(json).unwrap().into()
-    }
-
-    /// Mirror of EmailFilter for terse test construction.
-    #[derive(serde::Deserialize, Default)]
-    #[serde(rename_all = "camelCase", default)]
-    struct Raw {
-        text: Option<String>,
-        from: Option<String>,
-        subject: Option<String>,
-        in_mailbox: Option<String>,
-        in_mailbox_id: Option<String>,
-        unread: Option<bool>,
-        flagged: Option<bool>,
-        has_keyword: Option<String>,
-        and: Option<Vec<Raw>>,
-        or: Option<Vec<Raw>>,
-        not: Option<Vec<Raw>>,
-    }
-
-    impl From<Raw> for EmailFilter {
-        fn from(r: Raw) -> Self {
-            EmailFilter {
-                text: r.text,
-                from: r.from,
-                subject: r.subject,
-                in_mailbox: r.in_mailbox,
-                in_mailbox_id: r.in_mailbox_id,
-                unread: r.unread,
-                flagged: r.flagged,
-                has_keyword: r.has_keyword,
-                and: r.and.map(|v| v.into_iter().map(Into::into).collect()),
-                or: r.or.map(|v| v.into_iter().map(Into::into).collect()),
-                not: r.not.map(|v| v.into_iter().map(Into::into).collect()),
-                ..Default::default()
-            }
-        }
+        use async_graphql::InputType;
+        EmailFilter::parse(Some(async_graphql::Value::from_json(json).unwrap()))
+            .map_err(|error| error.into_server_error(Default::default()))
+            .unwrap()
     }
 
     #[test]

@@ -55,6 +55,22 @@ pub struct PageArgs {
     pub last: Option<i32>,
 }
 
+impl PageArgs {
+    fn validate(&self) -> Result<()> {
+        if self.first.is_some() && self.last.is_some() {
+            return Err(async_graphql::Error::new(
+                "Pass `first` or `last`, not both.",
+            ));
+        }
+        if self.after.is_some() && self.before.is_some() {
+            return Err(async_graphql::Error::new(
+                "Pass `after` or `before`, not both.",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The extra field on a connection built from a list we already hold.
 #[derive(SimpleObject)]
 pub struct CountFields {
@@ -92,16 +108,7 @@ pub fn page_of<T>(
     args: PageArgs,
     cursor_of: impl Fn(&T) -> String,
 ) -> Result<Page<T>> {
-    if args.first.is_some() && args.last.is_some() {
-        return Err(async_graphql::Error::new(
-            "Pass `first` or `last`, not both.",
-        ));
-    }
-    if args.after.is_some() && args.before.is_some() {
-        return Err(async_graphql::Error::new(
-            "Pass `after` or `before`, not both.",
-        ));
-    }
+    args.validate()?;
 
     let cursors: Vec<String> = items.iter().map(&cursor_of).collect();
     let total = items.len();
@@ -271,16 +278,7 @@ pub async fn emails_connection(
     constraint: Option<Value>,
     collapse_threads: bool,
 ) -> Result<EmailConnection> {
-    if args.first.is_some() && args.last.is_some() {
-        return Err(async_graphql::Error::new(
-            "Pass `first` or `last`, not both.",
-        ));
-    }
-    if args.after.is_some() && args.before.is_some() {
-        return Err(async_graphql::Error::new(
-            "Pass `after` or `before`, not both.",
-        ));
-    }
+    args.validate()?;
 
     let mailboxes = resolve_mailbox_names(ctx, filter.as_ref()).await?;
     let jmap_filter = filter.as_ref().and_then(|f| f.to_jmap(&mailboxes));

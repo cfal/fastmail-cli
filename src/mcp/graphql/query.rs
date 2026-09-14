@@ -12,6 +12,14 @@ use super::{CardDavCreds, SharedClient};
 
 pub struct QueryRoot;
 
+async fn require_email(ctx: &Context<'_>, email_id: &str) -> Result<crate::models::Email> {
+    ctx.data::<Emails>()?
+        .load_one(email_id.to_string())
+        .await
+        .map_err(to_gql_error)?
+        .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))
+}
+
 #[Object]
 #[allow(clippy::too_many_arguments)]
 impl QueryRoot {
@@ -143,12 +151,7 @@ impl QueryRoot {
         ctx: &Context<'_>,
         #[graphql(desc = "Any email ID in the thread")] email_id: String,
     ) -> Result<GqlThread> {
-        let loader = ctx.data::<Emails>()?;
-        let email = loader
-            .load_one(email_id.clone())
-            .await
-            .map_err(to_gql_error)?
-            .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
+        let email = require_email(ctx, &email_id).await?;
         let thread_id = email
             .thread_id
             .ok_or_else(|| async_graphql::Error::new("Email has no thread ID"))?;
@@ -231,12 +234,7 @@ impl QueryRoot {
         first: Option<i32>,
         last: Option<i32>,
     ) -> Result<ListConnection<GqlAttachment>> {
-        let loader = ctx.data::<Emails>()?;
-        let email = loader
-            .load_one(email_id.clone())
-            .await
-            .map_err(to_gql_error)?
-            .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
+        let email = require_email(ctx, &email_id).await?;
         paginate(
             attachments_of(&email),
             PageArgs {
@@ -256,12 +254,7 @@ impl QueryRoot {
         #[graphql(desc = "The email ID the attachment belongs to")] email_id: String,
         #[graphql(desc = "The blob ID of the attachment (from attachments query)")] blob_id: String,
     ) -> Result<Option<GqlAttachment>> {
-        let loader = ctx.data::<Emails>()?;
-        let email = loader
-            .load_one(email_id.clone())
-            .await
-            .map_err(to_gql_error)?
-            .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
+        let email = require_email(ctx, &email_id).await?;
         Ok(attachments_of(&email)
             .into_iter()
             .find(|a| a.blob_id == blob_id))
