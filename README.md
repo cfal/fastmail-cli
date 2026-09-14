@@ -448,7 +448,7 @@ fastmail masked delete MASKED_EMAIL_ID -y
 
 ## Output Format
 
-All commands output JSON with this structure:
+Mail and contact command results normally use this JSON envelope:
 
 ```json
 {
@@ -468,27 +468,30 @@ fastmail list mailboxes | jq '.data[] | select(.role == "inbox") | .unreadEmails
 # List email subjects
 fastmail list emails | jq '.data.emails[].subject'
 
-# Get email body
-fastmail get EMAIL_ID | jq -r '.data.bodyValues | to_entries[0].value.value'
+# Inspect email body parts and their values
+fastmail get EMAIL_ID | jq '.data | {textBody, htmlBody, bodyValues}'
 ```
 
-## Claude Code Skills
+## Agent Skill
 
-If you're using [Claude Code](https://claude.ai/claude-code), this repo ships skills that teach agents how to use the CLI — no need to explain flags or workflows manually.
+The portable [fastmail-cli skill](skills/fastmail-cli/SKILL.md) teaches agents how
+to use the CLI, interpret results, and distinguish read-only operations from
+writes. Its focused references cover search, conversations, composition,
+attachments, contacts, and masked addresses.
 
-Copy the skills into your project's `.claude/skills/` directory (or anywhere Claude Code loads skills from), then invoke them:
+Install the entire `skills/fastmail-cli` directory in your agent's supported skill
+location, keeping `SKILL.md` and `references/` together. For
+[Claude Code](https://claude.ai/claude-code), run from this repository's root:
 
+```bash
+mkdir -p ~/.claude/skills
+cp -R skills/fastmail-cli ~/.claude/skills/
 ```
-/fastmail              # full command reference + common patterns
-/fastmail/search       # search filters, date ranges, workflows
-/fastmail/compose      # send, reply, forward, drafts, identities
-/fastmail/conversations # list, get, thread, mark-read, triage
-/fastmail/attachments  # download, raw vs json, text extraction
-/fastmail/masked       # masked email CRUD
-/fastmail/contacts     # CardDAV setup, list/search
-```
 
-Skills are in `.claude/skills/` in this repo. Each one includes concrete examples and agent-oriented workflow patterns.
+Then invoke `/fastmail-cli`. The topic references are loaded as needed, not
+separate slash commands. Other agents use their own skill installation and
+invocation mechanisms. The skill does not install the `fastmail` executable or
+configure credentials.
 
 ## MCP Server (Claude Integration)
 
