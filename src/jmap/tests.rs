@@ -1245,6 +1245,71 @@ async fn email_change_batch_returns_empty_and_update_only_windows() {
 }
 
 #[tokio::test]
+async fn email_change_batch_accepts_an_empty_terminal_continuation() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let state = body["methodCalls"][0][1]["sinceState"].as_str().unwrap();
+            let mut page = match state {
+                "s0" => checkpoint_page("s0", "s1", true),
+                "s1" => checkpoint_page("s1", "s1", false),
+                _ => panic!("Unexpected state"),
+            };
+            if state == "s0" {
+                page["created"] = json!(["e1"]);
+            }
+            ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", page))
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    // An empty terminal page declares its newState current (RFC 8620 section 5.2).
+    // It cannot advance the checkpoint past any IDs omitted from the batch.
+    let batch = mock_client(&server.uri())
+        .email_change_batch("s0")
+        .await
+        .unwrap();
+    assert_eq!(batch.old_state, "s0");
+    assert_eq!(batch.new_state, "s1");
+    assert_eq!(batch.created, ["e1"]);
+}
+
+#[tokio::test]
+async fn email_checkpoints_allow_supplemental_responses_without_using_unrelated_results() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let call = &body["methodCalls"][0];
+            let data = match call[0].as_str().unwrap() {
+                "Email/get" => {
+                    json!({"accountId":"test-account", "state":"s0", "list":[], "notFound":[]})
+                }
+                "Email/changes" => checkpoint_page("s0", "s1", false),
+                _ => panic!("Unexpected method"),
+            };
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[
+                [call[0], {"newState":"wrong", "state":"wrong"}, "unrelated"],
+                ["Supplemental/result", {}, call[2]],
+                [call[0], data, call[2]],
+                ["Supplemental/anotherResult", {}, call[2]]
+            ]}))
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = mock_client(&server.uri());
+    assert_eq!(client.email_checkpoint().await.unwrap().state, "s0");
+    assert_eq!(
+        client.email_change_batch("s0").await.unwrap().new_state,
+        "s1"
+    );
+}
+
+#[tokio::test]
 async fn email_change_batch_rejects_malformed_pages_instead_of_defaulting_fields() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
     let valid = checkpoint_page("s0", "s1", false);
@@ -1301,6 +1366,7 @@ async fn email_change_batch_validates_method_and_call_id() {
         json!([["Email/changes", page, "wrong"]]),
         json!([["Email/changes", page]]),
         json!([["Email/changes", page, "c0"], ["Email/changes", page, "c0"]]),
+        json!([["error", {"type":"cannotCalculateChanges"}, "c0"], ["Email/changes", page, "c0"]]),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

@@ -63,12 +63,13 @@ fn checkpoint_response<T: for<'de> Deserialize<'de>>(
     method: &str,
     call_id: &str,
 ) -> Result<T> {
-    let response = responses.first().unwrap_or(&Value::Null);
-    if responses.len() != 1
-        || response.as_array().is_none_or(|array| array.len() != 3)
-        || (response[0] != method && response[0] != "error")
-        || response[2] != call_id
-    {
+    // JMAP permits supplemental responses to a method call. Only its requested
+    // result (or error) carries the checkpoint; conflicting results fail closed.
+    let mut matching = responses.iter().filter(|response| {
+        response[2] == call_id && (response[0] == method || response[0] == "error")
+    });
+    let response = matching.next().unwrap_or(&Value::Null);
+    if matching.next().is_some() || response.as_array().is_none_or(|array| array.len() != 3) {
         return Err(invalid_response(
             method,
             "Unexpected method response or call ID",
