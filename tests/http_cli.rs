@@ -310,7 +310,11 @@ async fn checkpoint_cli_reports_resync_without_resetting_or_leaking_partial_ids(
                     ),
                     "Email/changes" => {
                         assert_eq!(call[1]["sinceState"], if after_page { "middle" } else { "stale" });
-                        ("error", json!({"type":"cannotCalculateChanges"}))
+                        ("error", json!({"type":"cannotCalculateChanges", "description": if after_page {
+                            "Cannot generate an intermediate state"
+                        } else {
+                            "State expired"
+                        }}))
                     }
                     "Email/get" => {
                         assert_eq!(call[1], json!({"accountId":"acct", "ids":[]}));
@@ -333,6 +337,14 @@ async fn checkpoint_cli_reports_resync_without_resetting_or_leaking_partial_ids(
             "error":"Email change history is unavailable; backfill before using currentState",
             "data":{"type":"resync-required", "accountId":"acct", "staleState":"stale", "currentState":"replacement"}
         });
+        expected["data"]["staleStateError"] = json!(format!(
+            "JMAP error: Email/changes failed - cannotCalculateChanges: {}",
+            if after_page {
+                "Cannot generate an intermediate state"
+            } else {
+                "State expired"
+            }
+        ));
         if state_fails {
             expected["data"]["currentState"] = Value::Null;
             expected["data"]["currentStateError"] =

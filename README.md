@@ -366,6 +366,8 @@ since the previous attempt. If you fetch before enqueueing instead, do not save
 returns exit status 1 and no successful batch or partial checkpoint. Aggregation
 also fails, rather than truncates, above 1,000 pages, 100,000 ID entries (including
 duplicates), or 16 MiB of ID/state strings across pages.
+For `limitExceeded`, capture a fresh state with `email-state` and use the backfill
+procedure below instead of repeatedly retrying the oversized window.
 
 If JMAP returns `cannotCalculateChanges`, `changes` exits 1 with structured data:
 
@@ -377,12 +379,14 @@ If JMAP returns `cannotCalculateChanges`, `changes` exits 1 with structured data
     "type": "resync-required",
     "accountId": "account",
     "staleState": "s0",
+    "staleStateError": "JMAP error: Email/changes failed - cannotCalculateChanges: State expired",
     "currentState": "replacement-state"
   }
 }
 ```
 
 `staleState` is the original caller-supplied state, even if a later page failed.
+`staleStateError` preserves the JMAP error and any server-provided explanation.
 No partial IDs are emitted and the command does not reset or continue. If the
 replacement-state lookup also fails, `currentState` is `null` and
 `currentStateError` explains why; obtain a state with `email-state` before recovery.

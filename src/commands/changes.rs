@@ -10,6 +10,8 @@ use serde::Serialize;
 pub struct EmailResyncRequired {
     pub account_id: String,
     pub stale_state: String,
+    /// The original JMAP error, including any server-provided explanation.
+    pub stale_state_error: String,
     /// Null when even the replacement-state lookup failed. Obtain a fresh state
     /// before starting the backfill in that case.
     pub current_state: Option<String>,
@@ -31,7 +33,8 @@ pub async fn changes(since_state: &str) -> anyhow::Result<()> {
             Output::success(batch).print();
             Ok(())
         }
-        Err(Error::Jmap { error_type, .. }) if error_type == "cannotCalculateChanges" => {
+        Err(error) if matches!(&error, Error::Jmap { error_type, .. } if error_type == "cannotCalculateChanges") =>
+        {
             let account_id = client
                 .session()?
                 .primary_account_id()
@@ -44,6 +47,7 @@ pub async fn changes(since_state: &str) -> anyhow::Result<()> {
             Err(EmailResyncRequired {
                 account_id,
                 stale_state: since_state.into(),
+                stale_state_error: error.to_string(),
                 current_state,
                 current_state_error,
             }

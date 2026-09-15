@@ -102,9 +102,12 @@ IDs from the old state. Commit successful empty batches too.
 
 Any failed page returns no successful batch or partial checkpoint. Aggregation
 fails above 1,000 pages, 100,000 ID entries, or 16 MiB of ID/state strings rather
-than silently truncating. `cannotCalculateChanges` exits 1 with
+than silently truncating. Recover from `limitExceeded` with `email-state` and the
+backfill procedure below, rather than repeatedly retrying the oversized window.
+`cannotCalculateChanges` exits 1 with
 `.data.type == "resync-required"`, `accountId`, original `staleState`, and
-`currentState`. Do not treat this as a successful advance. If the replacement
+`currentState`; `staleStateError` preserves the original JMAP error and explanation.
+Do not treat this as a successful advance. If the replacement
 lookup failed, `currentState` is null and `currentStateError` gives the error;
 obtain a fresh state with `email-state` before backfill.
 
