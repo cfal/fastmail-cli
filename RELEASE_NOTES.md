@@ -1,32 +1,35 @@
-# v4.0.4
+# v4.0.5
 
-## Readable Email Bodies
+## Caller-Managed Email Checkpoints
 
-- Full CLI reads (`get`, `thread`, and `watch --full`) now include `readableBody`
-  alongside unchanged JMAP body values. Agents can read HTML-only messages
-  without building their own HTML extractor.
-- Choose `--body-format auto|markdown|text|raw`. Automatic mode prefers genuine
-  plain text and converts actual HTML parts to Markdown. Markdown mode prefers
-  the HTML alternative; plain-text parts use literal blocks to preserve layout.
-- Select `readableBody(format: AUTO|MARKDOWN|TEXT)` on GraphQL/MCP emails,
-  including connections, threads, and subscription arrivals. It shares the lazy
-  detail fetch, and queued conversions share body inputs rather than deep-cloning
-  them per field. Existing public Rust loader APIs remain available.
+- `fastmail email-state` reads the account's current opaque Email state without
+  fetching mail. `fastmail changes --since-state STATE` immediately follows all
+  change pages and returns one complete ID-only batch, including `accountId`,
+  original `oldState`, final `newState`, and `created`/`updated`/`destroyed` arrays.
+  Both commands support direct access and `--server`.
+- Keep durable processing under caller control: atomically enqueue IDs and save
+  the candidate checkpoint, then fetch/process pending messages separately.
+  Restart from the old state after an uncommitted result to replay discoverable
+  changes. The CLI never persists or acknowledges a checkpoint on your behalf.
+- Preserve every page's IDs, including duplicates and creations later destroyed,
+  without assuming chronological order or collapsing them into net changes.
+  Successful empty batches can advance the state too.
 
-## Fidelity And Safety
+## Recovery And Limits
 
-- Use `html-to-markdown-rs` locally, preserving selected JMAP part order without
-  combining alternative representations or trimming quoted conversations.
-- Return source-part metadata, truncation and encoding flags, and fidelity
-  warnings. Conversion is best-effort, limited to 128 parts, 1 MiB of selected
-  input, 1 MiB of returned content, and 64 HTML traversal levels. These limits do
-  not bound upstream body fetching or every intermediate parser allocation.
-- Replace images and embedded media with escaped alt text or omission notices.
-  No remote, CID, or data-URL resource is loaded, and no scripts execute. Text
-  mode places SVG/MathML omission notices at the end of the body part.
-- Keep original bodies available for inspection. Derived content remains
-  untrusted; conversion is neither a browser rendering nor a security sanitizer.
-- Write diagnostic logs to stderr so stdout remains valid JSON/NDJSON.
+- Return no partial successful batch or checkpoint on pagination, transport,
+  validation, or limit failures. Aggregation is capped at 1,000 pages, 100,000 ID
+  entries, and 16 MiB of ID/state strings, rather than silently truncated.
+- On `cannotCalculateChanges`, exit 1 with structured `resync-required` data,
+  original `staleState`, the server error in `staleStateError`, and `currentState`.
+  If the replacement-state lookup fails, return `currentState: null` and
+  `currentStateError`. Never silently reset or continue.
+- Document SQLite-style atomic consumption and recovery: capture a replacement
+  state before backfill, durably queue the backfill IDs, then resume changes from
+  that captured state. Use the same backfill procedure for oversized windows.
+- Existing `watch`, GraphQL subscriptions, and legacy Rust APIs remain unchanged.
+  Change history is server-dependent, not an audit log: messages created and
+  destroyed between checkpoints may be omitted by JMAP entirely.
 
 Four platform archives include licenses; `SHA256SUMS` covers all four archives.
 The release also publishes Linux amd64/arm64 container manifests.
