@@ -305,6 +305,100 @@ existing mail are not arrivals.
 Reconnects, and the rare case where the server has discarded change history and
 the cursor has to resync, are reported on stderr; stdout stays pure NDJSON.
 
+Watch keeps its cursor only in memory and starts at the current state after a
+process restart. Use the commands below when downtime must be reconciled from
+a caller-owned checkpoint. Existing watch and GraphQL subscription behavior is
+unchanged; neither accepts a saved Email state.
+
+### Caller-Managed Email Checkpoints
+
+```bash
+# Read the current account-wide Email state, without retrieving any mail
+fastmail email-state
+
+# Immediately catch up from the last state your application committed
+fastmail changes --since-state "$state"
+```
+
+Both commands support `--server` and require only read access. `email-state`
+returns `{"success":true,"data":{"accountId":"account","state":"s0"}}`.
+`changes` follows every `hasMoreChanges` page before printing one JSON envelope:
+
+```json
+{
+  "success": true,
+  "data": {
+    "accountId": "account",
+    "oldState": "s0",
+    "newState": "s2",
+    "created": ["email-1", "email-2"],
+    "updated": ["email-3"],
+    "destroyed": ["email-4"]
+  }
+}
+```
+
+These commands are stateless and ID-only: no body fetch, polling, local cursor
+file, or implicit acknowledgment. Treat states as opaque strings scoped to the
+account and server, not timestamps or sortable values. There is no mailbox
+filter. The arrays concatenate every page in server order, not chronological
+order; duplicates and IDs in multiple arrays are retained. In particular, a
+created ID is not removed if a later page reports it destroyed. Deduplicate
+work by account and email ID. Empty batches are successful too, and their state
+may still advance.
+
+For a SQLite-backed consumer:
+
+1. Read the last committed state and call `changes`. Require exit status zero
+   and `success: true`; verify `accountId` and `oldState` against your checkpoint.
+2. In one transaction, enqueue **all** IDs you need and save `newState`. Use a
+   unique account/email key for pending work. Use one checkpoint writer, or
+   compare the stored state with `oldState` inside the transaction to reject
+   competing advances.
+3. Fetch/process the durable pending IDs separately. Leave failed work pending;
+   saving a discovery checkpoint is not acknowledgment of successful processing.
+   An ID may already be deleted when fetched; handle that explicitly.
+
+A crash before that transaction commits leaves the old state intact. Restarting
+from it rediscovers the still-available changes, possibly with additional changes
+since the previous attempt. If you fetch before enqueueing instead, do not save
+`newState` until every required fetch succeeds. A page/transport/parse failure
+returns exit status 1 and no successful batch or partial checkpoint. Aggregation
+also fails, rather than truncates, above 1,000 pages, 100,000 ID entries (including
+duplicates), or 16 MiB of ID/state strings across pages.
+
+If JMAP returns `cannotCalculateChanges`, `changes` exits 1 with structured data:
+
+```json
+{
+  "success": false,
+  "error": "Email change history is unavailable; backfill before using currentState",
+  "data": {
+    "type": "resync-required",
+    "accountId": "account",
+    "staleState": "s0",
+    "currentState": "replacement-state"
+  }
+}
+```
+
+`staleState` is the original caller-supplied state, even if a later page failed.
+No partial IDs are emitted and the command does not reset or continue. If the
+replacement-state lookup also fails, `currentState` is `null` and
+`currentStateError` explains why; obtain a state with `email-state` before recovery.
+
+For initial synchronization or resync, capture a replacement state **before**
+starting a fully paginated backfill over your chosen time window, with overlap.
+Only after the backfill's IDs are durably queued should you commit that captured
+state; then run `changes` from it to catch arrivals during backfill. Never sample
+a fresh state after backfill and commit that instead: it can skip concurrent mail.
+
+JMAP changes are not an audit log. History retention is server-dependent, and
+messages both created and destroyed between checkpoints can be omitted entirely
+by the server. A time-window backfill cannot reconstruct deleted mail or guarantee
+coverage of imports with older received dates. Choose recovery coverage for your
+application; these commands do not promise exactly-once delivery or full history.
+
 ### List Identities
 
 View available sender identities (useful for `--from`):

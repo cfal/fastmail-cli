@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `email-state` and `changes --since-state` for caller-managed, account-wide
+  Email checkpoints, without changing `watch` or GraphQL subscriptions.
+- Complete ID-only change batches across all JMAP pages, including updates and
+  deletions, with strict response validation and bounded aggregation. Failures
+  never expose a partial checkpoint; unavailable history returns a structured
+  `resync-required` error for caller-controlled backfill and replay.
+
 ## [4.0.4] - 2026-09-14
 
 ### Added

@@ -15,7 +15,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 ## Organization
 
 - `src/carddav/tests.rs`: DAV parsing, property-preserving writes, conditional mutations, URL and credential isolation.
-- `src/jmap/tests.rs`: request shapes, capability and object limits, composition, exact/domain sender selection, recipients, uploads, and HTTP error classification.
+- `src/jmap/tests.rs`: request shapes, capability and object limits, composition, exact/domain sender selection, recipients, uploads, and HTTP error classification. Checkpoint tests cover complete pagination, replay, strict response validation, stale states, failures, and aggregation limits.
 - `src/jmap/events.rs` and `src/jmap/watch.rs`: streaming parser boundaries, cursor retention, resync, reconnects, filtering, and fatal errors.
 - `src/mcp/tests.rs`: complete HTTP router contracts, MCP tools, transport routing, and server-owned credentials.
 - `src/mcp/http_security.rs`: Basic auth, browser policy, and exact-bound request preservation.
@@ -24,7 +24,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 - Small pure helpers retain tests beside their implementations, including GraphQL input limits, filters, SDL slicing, image bounds, and model serialization.
 - `src/models/readable_body_tests.rs`: MIME-aware body selection, HTML conversion, image policy, source fidelity, failures, and limits, using synthetic email fixtures in `tests/fixtures/`.
 - `tests/config.rs`: real configuration getters and persistence in child processes with isolated homes and environment variables.
-- `tests/http_cli.rs`: executable-level output, exit status, remote transport, domain senders and names across compose operations, downloads, and destructive-command confirmation.
+- `tests/http_cli.rs`: executable-level output, exit status, remote transport, domain senders and names across compose operations, downloads, and destructive-command confirmation. Checkpoint tests exercise immediate restart catch-up, replay after failed fetches, no partial output, and structured resync failures.
 - `src/main.rs`: Clap argument-definition consistency and literal help text.
 - `tests/extraction.rs`: generated document fixtures for supported extraction formats.
 - `web/fetcher.test.js`: GraphiQL HTTP/SSE routing, cancellation, per-request headers, and failure propagation.

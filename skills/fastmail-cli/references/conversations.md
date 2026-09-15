@@ -74,6 +74,48 @@ Use a bounded execution/cancellation plan unless a persistent monitor was
 requested. Surface the stderr warning if the server drops change history:
 resynchronization can miss arrivals, so watch is not an audit log.
 
+## Resume Across Restarts
+
+Use caller-managed checkpoints, not `watch`, when process/VM downtime must be
+reconciled. These are bounded, read-only, one-shot commands and work with `--server`:
+
+```bash
+fastmail email-state
+fastmail changes --since-state "$state"
+```
+
+`email-state` returns `.data.accountId` and `.data.state` without fetching mail.
+`changes` immediately follows all JMAP pages and returns one envelope with
+`accountId`, the supplied `oldState`, final `newState`, and `created`, `updated`,
+`destroyed` ID arrays. It never fetches bodies or saves/acknowledges a cursor.
+States are opaque and scoped to the account/server; preserve them exactly. No
+mailbox filtering is supported. Arrays retain server order, duplicates, and IDs
+appearing in multiple arrays, including creations later destroyed.
+
+Require exit zero and `success: true`, then verify the account and old state.
+Atomically enqueue every required ID and save `newState` in the caller's database;
+use one checkpoint writer or compare the stored old state in that transaction.
+Deduplicate work by account/email ID, fetch from the durable pending queue, and
+leave failures pending. If fetching before enqueueing, do not advance the state
+until every required fetch succeeds. A crash before commit can replay discoverable
+IDs from the old state. Commit successful empty batches too.
+
+Any failed page returns no successful batch or partial checkpoint. Aggregation
+fails above 1,000 pages, 100,000 ID entries, or 16 MiB of ID/state strings rather
+than silently truncating. `cannotCalculateChanges` exits 1 with
+`.data.type == "resync-required"`, `accountId`, original `staleState`, and
+`currentState`. Do not treat this as a successful advance. If the replacement
+lookup failed, `currentState` is null and `currentStateError` gives the error;
+obtain a fresh state with `email-state` before backfill.
+
+For initial sync or recovery, capture the replacement state **before** a fully
+paginated time-window backfill with overlap. Queue all backfill IDs durably before
+committing that captured state, then run `changes` from it to cover concurrent
+arrivals. Never replace it with a state sampled after backfill. Recovery coverage
+is caller policy: expired history, deleted messages, and older-dated imports may
+not be recoverable from a time window. Changes are not an audit log; a message
+created and destroyed between checkpoints can be absent even before history expires.
+
 ## Authorized State Changes
 
 These are separate operations, not automatic follow-ups to reading:

@@ -12,7 +12,7 @@ contacts use CardDAV. Check `fastmail --version` and the relevant subcommand's
 ## Choose The Relevant Reference
 
 - [Search](references/search.md): filter flags, dates, limits, finding message IDs.
-- [Conversations](references/conversations.md): list, get, thread, watch, and triage.
+- [Conversations](references/conversations.md): list, get, thread, watch, caller-managed checkpoints, and triage.
 - [Compose](references/compose.md): identities, send, reply, forward, and drafts.
 - [Attachments](references/attachments.md): file downloads, text extraction, image limits.
 - [Contacts](references/contacts.md): CardDAV credentials, lookup, and editing.
@@ -103,10 +103,14 @@ refusals, completions, and MCP transports have different output contracts.
 | `list mailboxes`, `list identities`, `contacts list/search`, `masked list` | `.data[]` resource records |
 | `send`, `reply`, `forward` | `.data.email_id` and `.data.status` (`sent` or `draft`) |
 | `watch` | One compact envelope per line, with one email in `.data` |
+| `email-state` | `.data.accountId` and `.data.state` |
+| `changes` | `.data.accountId`, `oldState`, `newState`, and `created`/`updated`/`destroyed` ID arrays |
 
 Check both the process exit status and `.success`. In particular, no-attachment
 downloads and partial image downloads can exit zero with `success: false`.
 Keep stderr separate from JSON stdout, including when debug logging is enabled.
+`changes` exits 1 with `.data.type == "resync-required"` when history is unavailable;
+that data is a recovery signal, not a checkpoint to commit without backfill.
 
 For Bash pipelines, use `pipefail` and reject unsuccessful envelopes before
 selecting data. This example preserves empty search results as an empty array:

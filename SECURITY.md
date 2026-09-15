@@ -72,6 +72,14 @@ at once per process. Output limits apply after conversion; parser allocations
 and CPU time are not hard-bounded by the output limit. Use OS resource limits
 for hostile mail, as for other document parsing.
 
+Caller-managed Email change batches are ID-only, account-wide reads. Aggregation
+fails without a checkpoint above 1,000 pages, 100,000 returned ID entries, or
+16 MiB of accumulated ID/state strings; upstream response limits still apply
+separately. These are not global memory or wall-clock limits. No cursor is saved
+or silently reset. Callers must validate the account/server, atomically persist
+pending IDs with their checkpoint, and handle unavailable change history with
+backfill. Existing in-memory watchers remain non-resumable across process restarts.
+
 ## Dependency Dispositions
 
 The September 2026 review found no evidence of deliberately malicious code in
