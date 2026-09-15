@@ -1106,6 +1106,358 @@ async fn test_email_changes_surfaces_cannot_calculate_changes() {
 }
 
 #[tokio::test]
+async fn email_checkpoint_reads_an_account_bound_opaque_state_without_mail() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    let state = " opaque / state+\"\n ";
+    Mock::given(method("POST"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["methodCalls"], json!([[
+                "Email/get", {"accountId":"test-account", "ids":[]}, "s0"
+            ]]));
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/get", {"accountId":"test-account", "state":state, "list":[], "notFound":[]}, "s0"
+            ]]}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        mock_client(&server.uri()).email_checkpoint().await.unwrap(),
+        EmailCheckpoint {
+            account_id: "test-account".into(),
+            state: state.into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn email_checkpoint_rejects_incomplete_or_mismatched_responses() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let valid = json!({"accountId":"test-account", "state":"s0", "list":[], "notFound":[]});
+    for (key, value) in [
+        ("accountId", None),
+        ("state", None),
+        ("list", None),
+        ("notFound", None),
+        ("accountId", Some(json!("another-account"))),
+        ("state", Some(json!(5))),
+        ("list", Some(json!([{"id":"unrequested"}]))),
+        ("notFound", Some(json!(["unrequested"]))),
+    ] {
+        let server = MockServer::start().await;
+        let mut data = valid.clone();
+        if let Some(value) = value {
+            data[key] = value;
+        } else {
+            data.as_object_mut().unwrap().remove(key);
+        }
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"methodResponses":[["Email/get", data, "s0"]]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = mock_client(&server.uri())
+            .email_checkpoint()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Jmap { error_type, .. } if error_type == "parse"),
+            "{key}"
+        );
+    }
+}
+
+fn checkpoint_page(old: &str, new: &str, more: bool) -> Value {
+    json!({"accountId":"test-account", "oldState":old, "newState":new,
+        "hasMoreChanges":more, "created":[], "updated":[], "destroyed":[]})
+}
+
+#[tokio::test]
+async fn email_change_batch_catches_up_all_pages_and_replays_without_fetching_mail() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    let saved = " opaque+state/\"\n ";
+    Mock::given(method("POST")).respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["methodCalls"].as_array().unwrap().len(), 1);
+        let call = &body["methodCalls"][0];
+        assert_eq!(call[0], "Email/changes");
+        assert_eq!(call[1]["accountId"], "test-account");
+        assert_eq!(call[1]["maxChanges"], 100);
+        let page = match call[1]["sinceState"].as_str().unwrap() {
+            value if value == saved => json!({"accountId":"test-account", "oldState":saved, "newState":"intermediate",
+                "hasMoreChanges":true, "created":["recent", "later-deleted"], "updated":["flagged"], "destroyed":[]}),
+            "intermediate" => json!({"accountId":"test-account", "oldState":"intermediate", "newState":"current",
+                "hasMoreChanges":false, "created":["older"], "updated":["flagged"], "destroyed":["later-deleted"]}),
+            other => panic!("Unexpected state {other}"),
+        };
+        ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", page))
+    }).expect(4).mount(&server).await;
+
+    // A fresh client with the last committed state must rediscover the same IDs.
+    for _ in 0..2 {
+        let batch = mock_client(&server.uri())
+            .email_change_batch(saved)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(batch).unwrap(),
+            json!({
+                "accountId":"test-account", "oldState":saved, "newState":"current",
+                "created":["recent", "later-deleted", "older"], "updated":["flagged", "flagged"], "destroyed":["later-deleted"]
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn email_change_batch_returns_empty_and_update_only_windows() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for (old, new, updated) in [
+        ("s0", "s0", json!([])),
+        ("", "s1", json!([])),
+        ("s0", "s1", json!(["e1"])),
+    ] {
+        let server = MockServer::start().await;
+        let mut page = checkpoint_page(old, new, false);
+        page["updated"] = updated.clone();
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", page)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let batch = mock_client(&server.uri())
+            .email_change_batch(old)
+            .await
+            .unwrap();
+        assert_eq!(batch.old_state, old);
+        assert_eq!(batch.new_state, new);
+        assert_eq!(json!(batch.updated), updated);
+        assert!(batch.created.is_empty() && batch.destroyed.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn email_change_batch_rejects_malformed_pages_instead_of_defaulting_fields() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let valid = checkpoint_page("s0", "s1", false);
+    for (key, value) in [
+        ("accountId", None),
+        ("oldState", None),
+        ("newState", None),
+        ("hasMoreChanges", None),
+        ("created", None),
+        ("updated", None),
+        ("destroyed", None),
+        ("accountId", Some(json!("wrong"))),
+        ("oldState", Some(json!("wrong"))),
+        ("newState", Some(json!(10))),
+        ("hasMoreChanges", Some(json!("false"))),
+        ("created", Some(Value::Null)),
+        ("updated", Some(json!([5]))),
+        ("destroyed", Some(json!([""]))),
+        ("created", Some(json!(vec!["e1"; 101]))),
+    ] {
+        let server = MockServer::start().await;
+        let mut page = valid.clone();
+        if let Some(value) = value {
+            page[key] = value;
+        } else {
+            page.as_object_mut().unwrap().remove(key);
+        }
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", page)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = mock_client(&server.uri())
+            .email_change_batch("s0")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Jmap { error_type, .. } if error_type == "parse"),
+            "{key}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn email_change_batch_validates_method_and_call_id() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let page = checkpoint_page("s0", "s1", false);
+    for responses in [
+        json!([]),
+        json!([null]),
+        json!([["Email/get", page, "c0"]]),
+        json!([["Email/changes", page, "wrong"]]),
+        json!([["Email/changes", page]]),
+        json!([["Email/changes", page, "c0"], ["Email/changes", page, "c0"]]),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"methodResponses":responses})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(
+            matches!(mock_client(&server.uri()).email_change_batch("s0").await,
+            Err(Error::Jmap { error_type, .. }) if error_type == "parse")
+        );
+    }
+}
+
+#[tokio::test]
+async fn email_change_batch_rejects_stalled_and_cyclic_states() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for (cycle, more, created) in [
+        (false, true, json!([])),
+        (false, false, json!(["e1"])),
+        (true, true, json!([])),
+        (true, false, json!([])),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let state = body["methodCalls"][0][1]["sinceState"].as_str().unwrap();
+                let mut page = if cycle && state == "s0" {
+                    checkpoint_page("s0", "s1", true)
+                } else {
+                    checkpoint_page(state, "s0", more)
+                };
+                page["created"] = created.clone();
+                ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", page))
+            })
+            .expect(if cycle { 2 } else { 1 })
+            .mount(&server)
+            .await;
+        assert!(
+            matches!(mock_client(&server.uri()).email_change_batch("s0").await,
+            Err(Error::Jmap { error_type, .. }) if error_type == "parse")
+        );
+    }
+}
+
+#[tokio::test]
+async fn email_change_batch_discards_failed_pages_and_can_retry_the_original_state() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    let fail = AtomicBool::new(true);
+    Mock::given(method("POST"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let state = body["methodCalls"][0][1]["sinceState"].as_str().unwrap();
+            let mut page = match state {
+                "s0" => checkpoint_page("s0", "s1", true),
+                "s1" if fail.swap(false, Ordering::SeqCst) => return ResponseTemplate::new(503),
+                "s1" => checkpoint_page("s1", "s2", false),
+                _ => panic!("Unexpected state"),
+            };
+            page["created"] = json!([if state == "s0" { "e1" } else { "e2" }]);
+            ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", page))
+        })
+        .expect(4)
+        .mount(&server)
+        .await;
+    let client = mock_client(&server.uri());
+    assert!(matches!(
+        client.email_change_batch("s0").await,
+        Err(Error::Server(_))
+    ));
+    let batch = client.email_change_batch("s0").await.unwrap();
+    assert_eq!(batch.old_state, "s0");
+    assert_eq!(batch.new_state, "s2");
+    assert_eq!(batch.created, ["e1", "e2"]);
+}
+
+#[tokio::test]
+async fn email_change_batch_propagates_stale_or_invalid_states_without_resetting() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for (error_type, after_page) in [
+        ("cannotCalculateChanges", false),
+        ("cannotCalculateChanges", true),
+        ("invalidArguments", false),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let call = &body["methodCalls"][0];
+                assert_eq!(call[0], "Email/changes");
+                let (method, data) = if after_page && call[1]["sinceState"] == "stale" {
+                    let mut page = checkpoint_page("stale", "s1", true);
+                    page["created"] = json!(["must-not-leak"]);
+                    ("Email/changes", page)
+                } else {
+                    ("error", json!({"type":error_type}))
+                };
+                ResponseTemplate::new(200).set_body_json(jmap_response(method, data))
+            })
+            .expect(if after_page { 2 } else { 1 })
+            .mount(&server)
+            .await;
+        assert!(
+            matches!(mock_client(&server.uri()).email_change_batch("stale").await,
+            Err(Error::Jmap { error_type: actual, .. }) if actual == error_type)
+        );
+    }
+}
+
+#[tokio::test]
+async fn email_change_batch_limits_fail_instead_of_returning_a_partial_checkpoint() {
+    use super::checkpoints::ChangeLimits;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    // Exactly two pages, four IDs and 14 bytes of states/IDs, including repeats.
+    for (pages, ids, bytes, succeeds, requests) in [
+        (2, 4, 14, true, 2),
+        (1, 4, 14, false, 1),
+        (2, 3, 14, false, 2),
+        (2, 4, 13, false, 2),
+        (2, 4, 1, false, 0),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(|request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let state = body["methodCalls"][0][1]["sinceState"].as_str().unwrap();
+                let mut page = match state {
+                    "s0" => checkpoint_page("s0", "s1", true),
+                    "s1" => checkpoint_page("s1", "s2", false),
+                    _ => panic!("Unexpected state"),
+                };
+                page["created"] = json!(["e1"]);
+                page["destroyed"] = json!(["e2"]);
+                ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", page))
+            })
+            .expect(requests)
+            .mount(&server)
+            .await;
+        let result = mock_client(&server.uri())
+            .email_change_batch_with_limits("s0", ChangeLimits { pages, ids, bytes })
+            .await;
+        if succeeds {
+            assert_eq!(result.unwrap().created, ["e1", "e1"]);
+        } else {
+            assert!(
+                matches!(result, Err(Error::Jmap { error_type, .. }) if error_type == "limitExceeded")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_get_email_summaries_skips_body_values() {
     use wiremock::matchers::{body_string_contains, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};

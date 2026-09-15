@@ -1,3 +1,4 @@
+mod checkpoints;
 mod events;
 mod watch;
 
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, instrument};
 
+pub use checkpoints::{EmailChangeBatch, EmailCheckpoint};
 pub use events::{EventParser, ServerEvent};
 pub use watch::{ArrivalWatcher, Arrivals, SharedJmapClient};
 
