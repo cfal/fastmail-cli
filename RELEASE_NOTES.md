@@ -31,5 +31,10 @@
   Change history is server-dependent, not an audit log: messages created and
   destroyed between checkpoints may be omitted by JMAP entirely.
 
+## Security
+
+- Update `rustls` to 0.23.45, fixing RUSTSEC-2026-0285: TLS 1.3 handshake
+  messages sent across encryption-level boundaries are now rejected.
+
 Four platform archives include licenses; `SHA256SUMS` covers all four archives.
 The release also publishes Linux amd64/arm64 container manifests.

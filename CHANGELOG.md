@@ -11,6 +11,11 @@
   never expose a partial checkpoint; unavailable history returns a structured
   `resync-required` error for caller-controlled backfill and replay.
 
+### Fixed
+
+- Update `rustls` to 0.23.45 to reject TLS 1.3 handshake messages crossing
+  encryption-level boundaries (RUSTSEC-2026-0285).
+
 ## [4.0.4] - 2026-09-14
 
 ### Added
