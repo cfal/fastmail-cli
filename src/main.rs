@@ -83,6 +83,16 @@ enum Commands {
         body_format: commands::EmailBodyFormat,
     },
 
+    /// Get the current account-wide Email state without fetching mail
+    EmailState,
+
+    /// Collect a complete, ID-only change batch from a caller-owned Email state
+    Changes {
+        /// Opaque Email state previously returned for this account; never saved by the CLI
+        #[arg(long, value_name = "STATE", allow_hyphen_values = true)]
+        since_state: String,
+    },
+
     /// Stream newly arrived emails as newline-delimited JSON, until interrupted
     Watch {
         /// Only report mail landing in this mailbox (name or role)
@@ -567,7 +577,17 @@ async fn main() {
 
     let result = run(cli).await;
     if let Err(e) = result {
-        Output::<()>::error(e.to_string()).print();
+        if let Some(resync) = e.downcast_ref::<commands::EmailResyncRequired>() {
+            Output {
+                success: false,
+                data: Some(resync),
+                error: Some(e.to_string()),
+                message: None,
+            }
+            .print();
+        } else {
+            Output::<()>::error(e.to_string()).print();
+        }
         std::process::exit(1);
     }
 }
@@ -616,6 +636,9 @@ async fn run_command(command: Commands) -> anyhow::Result<()> {
             email_id,
             body_format,
         } => commands::get_email_with_body_format(&email_id, body_format).await,
+
+        Commands::EmailState => commands::email_state().await,
+        Commands::Changes { since_state } => commands::changes(&since_state).await,
 
         Commands::Thread {
             email_id,
@@ -902,6 +925,27 @@ mod tests {
     #[test]
     fn command_definitions_are_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn change_commands_require_a_state_and_preserve_opaque_values() {
+        assert!(matches!(
+            Cli::try_parse_from(["fastmail", "email-state"])
+                .unwrap()
+                .command,
+            Commands::EmailState
+        ));
+        let error = Cli::try_parse_from(["fastmail", "changes"]).err().unwrap();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        for state in ["", "-opaque/state+", " state with spaces\n\" "] {
+            let cli = Cli::try_parse_from(["fastmail", "changes", "--since-state", state]).unwrap();
+            assert!(
+                matches!(cli.command, Commands::Changes { since_state } if since_state == state)
+            );
+        }
     }
 
     #[test]

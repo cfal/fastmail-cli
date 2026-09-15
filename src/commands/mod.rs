@@ -1,5 +1,6 @@
 mod auth;
 mod body;
+mod changes;
 mod contacts;
 mod download;
 mod forward;
@@ -17,6 +18,7 @@ mod watch;
 
 pub use auth::*;
 pub use body::EmailBodyFormat;
+pub use changes::*;
 pub use contacts::*;
 pub use download::*;
 pub use forward::*;

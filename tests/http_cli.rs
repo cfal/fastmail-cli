@@ -123,6 +123,265 @@ async fn bounded_output(command: &mut Command) -> std::process::Output {
     .unwrap()
 }
 
+fn change_page(old: &str, new: &str, more: bool, created: Value) -> Value {
+    json!({"accountId":"acct", "oldState":old, "newState":new,
+        "hasMoreChanges":more, "created":created, "updated":[], "destroyed":[]})
+}
+
+#[tokio::test]
+async fn checkpoint_cli_reads_current_state_without_email_records() {
+    let server = server().await;
+    Mock::given(method("POST")).and(path("/cli/v1/jmap"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["methodCalls"], json!([[
+                "Email/get", {"accountId":"acct", "ids":[]}, "s0"
+            ]]));
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/get", {"accountId":"acct", "state":"opaque+state/", "list":[], "notFound":[]}, "s0"
+            ]]}))
+        }).with_priority(1).expect(1).mount(&server).await;
+    let home = tempfile::tempdir().unwrap();
+    let output = bounded_output(command(&server, home.path()).arg("email-state")).await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({
+            "success":true, "data":{"accountId":"acct", "state":"opaque+state/"}
+        })
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn checkpoint_cli_catches_up_immediately_and_replays_after_a_failed_fetch() {
+    let server = server().await;
+    let saved = "- opaque+state/\"\n ";
+    Mock::given(method("POST"))
+        .and(path("/cli/v1/jmap"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["methodCalls"].as_array().unwrap().len(), 1);
+            let call = &body["methodCalls"][0];
+            assert_eq!(call[1]["accountId"], "acct");
+            // Body retrieval is separate work; its failure cannot commit a checkpoint.
+            if call[0] == "Email/get" {
+                assert_eq!(call[1]["ids"], json!(["e1"]));
+                return ResponseTemplate::new(503);
+            }
+            assert_eq!(call[0], "Email/changes");
+            assert_eq!(call[1]["maxChanges"], 100);
+            let mut page = match call[1]["sinceState"].as_str().unwrap() {
+                value if value == saved => {
+                    change_page(saved, "middle", true, json!(["e1", "gone"]))
+                }
+                "middle" => change_page("middle", "current", false, json!(["e2"])),
+                "current" => change_page("current", "no-creations", false, json!([])),
+                other => panic!("Unexpected sinceState {other}"),
+            };
+            page["updated"] = json!(["flagged"]);
+            if call[1]["sinceState"] == "middle" {
+                page["destroyed"] = json!(["gone"]);
+            }
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"methodResponses":[["Email/changes", page, call[2]]]}))
+        })
+        .with_priority(1)
+        .expect(6)
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let expected = json!({"success":true, "data":{
+        "accountId":"acct", "oldState":saved, "newState":"current",
+        "created":["e1", "gone", "e2"], "updated":["flagged", "flagged"], "destroyed":["gone"]
+    }});
+    let first =
+        bounded_output(command(&server, home.path()).args(["changes", "--since-state", saved]))
+            .await;
+    assert!(first.status.success(), "{first:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&first.stdout).unwrap(),
+        expected
+    );
+
+    let fetch = bounded_output(command(&server, home.path()).args(["get", "e1"])).await;
+    assert_eq!(fetch.status.code(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fetch.stdout).unwrap()["success"],
+        false
+    );
+
+    // The caller has not committed the first result. A restarted process replays it.
+    let replay =
+        bounded_output(command(&server, home.path()).args(["changes", "--since-state", saved]))
+            .await;
+    assert!(replay.status.success(), "{replay:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&replay.stdout).unwrap(),
+        expected
+    );
+
+    let next =
+        bounded_output(command(&server, home.path()).args(["changes", "--since-state", "current"]))
+            .await;
+    assert!(next.status.success(), "{next:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&next.stdout).unwrap(),
+        json!({"success":true,"data":{
+            "accountId":"acct", "oldState":"current", "newState":"no-creations",
+            "created":[], "updated":["flagged"], "destroyed":[]
+        }})
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 10); // Four sessions, five change pages, one failed detail fetch.
+    assert!(
+        requests
+            .iter()
+            .all(|request| matches!(request.url.path(), "/cli/v1/session" | "/cli/v1/jmap"))
+    );
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn checkpoint_cli_never_prints_partial_batches_on_page_failure() {
+    for failure in ["http", "malformed", "invalidArguments"] {
+        let server = server().await;
+        Mock::given(method("POST"))
+            .and(path("/cli/v1/jmap"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let call = &body["methodCalls"][0];
+                assert_eq!(call[0], "Email/changes");
+                let (method, data) = match call[1]["sinceState"].as_str().unwrap() {
+                    "saved" => (
+                        "Email/changes",
+                        change_page("saved", "middle", true, json!(["must-not-leak"])),
+                    ),
+                    "middle" => match failure {
+                        "http" => return ResponseTemplate::new(503),
+                        "malformed" => ("Email/changes", json!({"newState":"must-not-leak"})),
+                        _ => (
+                            "error",
+                            json!({"type":"invalidArguments", "description":"Invalid state"}),
+                        ),
+                    },
+                    _ => panic!("Unexpected state"),
+                };
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"methodResponses":[[method, data, call[2]]]}))
+            })
+            .with_priority(1)
+            .expect(2)
+            .mount(&server)
+            .await;
+        let home = tempfile::tempdir().unwrap();
+        let output = bounded_output(command(&server, home.path()).args([
+            "changes",
+            "--since-state",
+            "saved",
+        ]))
+        .await;
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["success"], false);
+        assert!(result["error"].is_string());
+        assert!(result.get("data").is_none());
+        assert!(
+            !String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("must-not-leak")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_cli_reports_resync_without_resetting_or_leaking_partial_ids() {
+    for (after_page, state_fails) in [(false, false), (true, false), (false, true), (true, true)] {
+        let server = server().await;
+        Mock::given(method("POST")).and(path("/cli/v1/jmap"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let call = &body["methodCalls"][0];
+                let (method, data) = match call[0].as_str().unwrap() {
+                    "Email/changes" if after_page && call[1]["sinceState"] == "stale" => (
+                        "Email/changes", change_page("stale", "middle", true, json!(["must-not-leak"]))
+                    ),
+                    "Email/changes" => {
+                        assert_eq!(call[1]["sinceState"], if after_page { "middle" } else { "stale" });
+                        ("error", json!({"type":"cannotCalculateChanges"}))
+                    }
+                    "Email/get" => {
+                        assert_eq!(call[1], json!({"accountId":"acct", "ids":[]}));
+                        if state_fails { return ResponseTemplate::new(503); }
+                        ("Email/get", json!({"accountId":"acct", "state":"replacement", "list":[], "notFound":[]}))
+                    }
+                    other => panic!("Unexpected method {other}"),
+                };
+                ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[method, data, call[2]]]}))
+            }).with_priority(1).expect(if after_page { 3 } else { 2 }).mount(&server).await;
+        let home = tempfile::tempdir().unwrap();
+        let output = bounded_output(command(&server, home.path()).args([
+            "changes",
+            "--since-state",
+            "stale",
+        ]))
+        .await;
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let mut expected = json!({"success":false,
+            "error":"Email change history is unavailable; backfill before using currentState",
+            "data":{"type":"resync-required", "accountId":"acct", "staleState":"stale", "currentState":"replacement"}
+        });
+        if state_fails {
+            expected["data"]["currentState"] = Value::Null;
+            expected["data"]["currentStateError"] =
+                json!("Server error: HTTP server request failed (503 Service Unavailable)");
+        }
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            expected
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), if after_page { 4 } else { 3 });
+        let first: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(first["methodCalls"][0][0], "Email/changes");
+        let last: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+        assert_eq!(last["methodCalls"][0][0], "Email/get");
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_cli_passes_malformed_states_to_jmap_without_silent_initialization() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/cli/v1/jmap"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let call = &body["methodCalls"][0];
+            assert_eq!(call[0], "Email/changes");
+            assert_eq!(call[1]["sinceState"], "");
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "error", {"type":"invalidArguments", "description":"Invalid sinceState"}, call[2]
+            ]]}))
+        })
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let output =
+        bounded_output(command(&server, home.path()).args(["changes", "--since-state", ""])).await;
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({
+            "success":false, "error":"JMAP error: Email/changes failed - invalidArguments: Invalid sinceState"
+        })
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
 async fn readable_email_server() -> MockServer {
     use wiremock::matchers::body_string_contains;
     let server = server().await;
