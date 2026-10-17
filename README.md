@@ -304,6 +304,11 @@ existing mail are not arrivals.
 
 Reconnects, and the rare case where the server has discarded change history and
 the cursor has to resync, are reported on stderr; stdout stays pure NDJSON.
+Malformed change responses and bounded-pager failures (`limitExceeded`) instead
+stop the watcher with an error without advancing its checkpoint. The limits count
+updated and destroyed IDs too, so a very large bulk move, mark-read or purge can
+trigger them without new arrivals. Reconcile the gap explicitly before restarting;
+watch does not silently reset an oversized window and discard its arrival history.
 
 Watch keeps its cursor only in memory and starts at the current state after a
 process restart. Use the commands below when downtime must be reconciled from
