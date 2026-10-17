@@ -18,6 +18,10 @@
 
 ### Fixed
 
+- Update MCP, TLS/QUIC, YAML, and ZIP dependencies to address new security and
+  maintenance advisories. Temporarily pin calamine's upstream ZIP 9 migration
+  until it is published, retaining spreadsheet extraction without new scanner
+  exceptions. Cover MCP session expiry and compressed Office/YAML extraction.
 - Validate JMAP method, call ID, account and complete get results; require positive
   write evidence. Preserve accepted submissions when automatic Sent filing fails,
   and never retry uncertain writes.
@@ -50,6 +54,8 @@
 ### Changed
 
 - Declare Rust 1.98.1 as the minimum toolchain for source builds.
+- Embedded MCP servers now use the rmcp 2.x SDK; library consumers integrating
+  `FastmailMcp` with rmcp must use the matching SDK major version.
 
 ## [4.0.5] - 2026-09-15
 

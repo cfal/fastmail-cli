@@ -1,13 +1,12 @@
 use std::io::{Cursor, Write};
 
-fn office_archive(files: &[(&str, &str)]) -> Vec<u8> {
+fn office_archive(files: &[(&str, &str)], compression: zip::CompressionMethod) -> Vec<u8> {
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (name, content) in files {
         archive
             .start_file(
                 *name,
-                zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Stored),
+                zip::write::SimpleFileOptions::default().compression_method(compression),
             )
             .unwrap();
         archive.write_all(content.as_bytes()).unwrap();
@@ -15,8 +14,8 @@ fn office_archive(files: &[(&str, &str)]) -> Vec<u8> {
     archive.finish().unwrap().into_inner()
 }
 
-pub fn office_documents() -> [(&'static str, Vec<u8>); 2] {
-    let docx = office_archive(&[
+pub fn office_documents() -> Vec<(&'static str, Vec<u8>)> {
+    let docx = &[
         (
             "[Content_Types].xml",
             r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
@@ -29,8 +28,8 @@ pub fn office_documents() -> [(&'static str, Vec<u8>); 2] {
             "word/document.xml",
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hello attachment</w:t></w:r></w:p></w:body></w:document>"#,
         ),
-    ]);
-    let xlsx = office_archive(&[
+    ];
+    let xlsx = &[
         (
             "[Content_Types].xml",
             r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
@@ -51,8 +50,16 @@ pub fn office_documents() -> [(&'static str, Vec<u8>); 2] {
             "xl/worksheets/sheet1.xml",
             r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Hello attachment</t></is></c></row></sheetData></worksheet>"#,
         ),
-    ]);
-    [("test.docx", docx), ("test.xlsx", xlsx)]
+    ];
+    let mut documents = Vec::new();
+    for compression in [
+        zip::CompressionMethod::Stored,
+        zip::CompressionMethod::Deflated,
+    ] {
+        documents.push(("test.docx", office_archive(docx, compression)));
+        documents.push(("test.xlsx", office_archive(xlsx, compression)));
+    }
+    documents
 }
 
 pub fn simple_pdf() -> Vec<u8> {
@@ -81,9 +88,10 @@ pub fn simple_pdf() -> Vec<u8> {
     pdf.into_bytes()
 }
 
-pub fn text_documents() -> [(&'static str, &'static str); 5] {
+pub fn text_documents() -> [(&'static str, &'static str); 6] {
     [
         ("test.txt", "Hello attachment"),
+        ("test.yaml", "message: Hello attachment\n"),
         (
             "test.html",
             "<html><body><p>Hello attachment</p></body></html>",

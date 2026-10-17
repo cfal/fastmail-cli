@@ -107,6 +107,200 @@ async fn json_routes_limit_sized_and_streamed_bodies_to_two_mib() {
 }
 
 #[tokio::test]
+async fn mcp_http_session_supports_tools_and_explicit_close() {
+    use serde_json::{Value, json};
+
+    async fn message(response: axum::response::Response) -> Value {
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            axum::body::to_bytes(response.into_body(), 64 * 1024),
+        )
+        .await
+        .expect("MCP response did not finish")
+        .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        let data = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim_start)
+            .find(|data| !data.is_empty())
+            .expect("missing MCP SSE message");
+        let message: Value = serde_json::from_str(data).unwrap();
+        assert!(message.get("error").is_none(), "{message}");
+        message
+    }
+
+    let router = in_process_router(
+        HttpSurfaces {
+            graphql: false,
+            graphiql: false,
+            browser: false,
+        },
+        None,
+    );
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/mcp",
+            Body::from(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                        "protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"}
+                    }
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let session = response.headers()["mcp-session-id"].clone();
+    let initialized = message(response).await;
+    assert_eq!(initialized["id"], 1);
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "fastmail");
+    let protocol = initialized["result"]["protocolVersion"].as_str().unwrap();
+
+    let session_request = |method, body| {
+        let mut req = request(method, "/mcp", body);
+        req.headers_mut().insert("mcp-session-id", session.clone());
+        req.headers_mut()
+            .insert("mcp-protocol-version", protocol.parse().unwrap());
+        req
+    };
+    let response = router
+        .clone()
+        .oneshot(session_request(
+            "POST",
+            Body::from(
+                json!({
+                    "jsonrpc": "2.0", "method": "notifications/initialized"
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = router
+        .clone()
+        .oneshot(session_request(
+            "POST",
+            Body::from(
+                json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let listed = message(response).await;
+    assert_eq!(listed["id"], 2);
+    let mut names: Vec<_> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["graphql", "schema_sdl"]);
+
+    let response = router
+        .clone()
+        .oneshot(session_request(
+            "POST",
+            Body::from(
+                json!({
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "schema_sdl", "arguments": {"types": ["QueryRoot"]}}
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let called = message(response).await;
+    assert_eq!(called["id"], 3);
+    assert_ne!(called["result"]["isError"], true);
+    assert!(
+        called["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("type QueryRoot")
+    );
+
+    let response = router
+        .clone()
+        .oneshot(session_request("DELETE", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let response = router
+        .oneshot(session_request(
+            "POST",
+            Body::from(
+                json!({
+                    "jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(start_paused = true)]
+async fn abandoned_mcp_session_expires_without_a_client_delete() {
+    use rmcp::transport::streamable_http_server::session::local::SessionConfig;
+    use serde_json::json;
+
+    let router = in_process_router(
+        HttpSurfaces {
+            graphql: false,
+            graphiql: false,
+            browser: false,
+        },
+        None,
+    );
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/mcp",
+            Body::from(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                        "protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": {"name": "abandoned", "version": "1"}
+                    }
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = response.headers()["mcp-session-id"].clone();
+    axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(SessionConfig::DEFAULT_KEEP_ALIVE + std::time::Duration::from_secs(1)).await;
+    let mut req = request(
+        "POST",
+        "/mcp",
+        Body::from(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).to_string()),
+    );
+    req.headers_mut().insert("mcp-session-id", session);
+    let response = router.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn cli_jmap_batch_limits_are_checked_before_authentication() {
     let router = in_process_router(
         HttpSurfaces {

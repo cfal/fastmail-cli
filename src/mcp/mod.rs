@@ -10,7 +10,7 @@ use std::sync::Arc;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
 };
 use tokio::sync::Mutex;
@@ -121,11 +121,13 @@ impl FastmailMcp {
     }
 
     fn text_result(text: impl Into<String>) -> ToolResult {
-        Ok(CallToolResult::success(vec![Content::text(text.into())]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            text.into(),
+        )]))
     }
 
     fn error_result(msg: impl Into<String>) -> ToolResult {
-        Ok(CallToolResult::error(vec![Content::text(msg.into())]))
+        Ok(CallToolResult::error(vec![ContentBlock::text(msg.into())]))
     }
 }
 

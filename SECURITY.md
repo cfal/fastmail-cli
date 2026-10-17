@@ -159,11 +159,29 @@ the reviewed first-party source or targeted dependency/build inspection. This
 is not proof that all dependency, action, toolchain or historical source is
 free of malicious code.
 
-PDF extraction now uses the published `xberg` 1.1.5 Rust-native PDF backend.
+PDF extraction uses the published `xberg` 1.3.10 Rust-native PDF backend.
 There is no vendored crate, PDFium runtime extraction, or unpinned PDFium build
 download. GraphiQL assets are built from an npm integrity lockfile and embedded
 locally, including workers; no runtime CDN scripts are loaded. Mailbox data and
 HTTP headers are not persisted to browser storage.
+
+The v4.0.6 dependency refresh updates `rmcp` to 2.2.0, `rustls` to 0.23.46,
+`quinn-proto` to 0.11.19, and ZIP parsing to `zip` 9.0.5. `xberg` 1.3.10
+replaces the unmaintained `unsafe-libyaml` dependency with `yaml_serde` and
+`libyaml-rs`. MCP HTTP sessions retain the existing outer authentication,
+Host/Origin validation, and request-body limits; rmcp now removes abandoned
+sessions after its idle timeout rather than retaining them permanently.
+
+Published `calamine` 0.36.1 still requires vulnerable ZIP 8.6. To retain Excel
+support without a scanner exception, `[patch.crates-io]` pins its upstream
+[ZIP 9 migration](https://github.com/tafia/calamine/commit/c15fefe995e890da206b58542b4e45190f564f30)
+at commit `c15fefe995e890da206b58542b4e45190f564f30`. This is a temporary Git
+source dependency, not a local fork or vendored copy. Remove the patch once a
+published version accepted by xberg includes this migration. Cargo.lock pins
+the commit and resolved dependencies; builds do not follow a moving branch.
+Cargo applies patches only from the workspace root. Downstream library users
+must carry this same patch in their root manifest until the upstream release;
+the CLI's own builds and `cargo install --git` use the patch above.
 
 Two scanner exceptions expire on 2026-12-13:
 

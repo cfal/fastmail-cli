@@ -35,12 +35,24 @@
   the 64 MiB per-blob limit, and bound download and processing concurrency.
   Extraction backend internals still have documented memory and CPU limitations.
 - Page thread member summaries before loading bodies, fetch bodies only when
-  selected, and release the account lock during independent reads. Existing
-  public Rust APIs and eager thread loading remain compatible.
+  selected, and release the account lock during independent reads. Public
+  JMAP/GraphQL data shapes and eager thread loading remain unchanged.
 - Bound arrival-change paging and report subscription history gaps explicitly.
   Oversized change windows stop the watcher without advancing its checkpoint.
   Subscriptions require exactly one expanded root-field occurrence, including
   aliases, fragments, and repeats.
+
+## Dependency Security
+
+- Update rmcp to 2.2.0, fixing abandoned MCP HTTP session retention and upstream
+  OAuth/redirect issues. Library consumers embedding `FastmailMcp` must use
+  rmcp 2.x; CLI and HTTP interfaces remain unchanged.
+- Update rustls to 0.23.46 and quinn-proto to 0.11.19 for their security fixes.
+  Upgrade xberg to 1.3.10, replacing its unmaintained YAML backend, and use ZIP
+  9.0.5 throughout. Spreadsheet support uses an exact upstream calamine commit
+  until its ZIP 9 migration is published.
+- Retain only the existing, expiring `lru` and `paste` exceptions documented in
+  SECURITY.md. No new advisory suppressions are added.
 
 Source builds require Rust 1.98.1 or newer.
 
