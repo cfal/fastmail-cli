@@ -180,7 +180,7 @@ impl CardDavClient {
         self.discover_addressbooks(false).await
     }
 
-    async fn discover_addressbooks(&self, strict: bool) -> Result<Vec<AddressBook>> {
+    async fn discover_addressbooks(&self, require_complete: bool) -> Result<Vec<AddressBook>> {
         let encoded_user = utf8_percent_encode(&self.username, PATH_SEGMENT);
         let url = format!("{}/dav/addressbooks/user/{}/", self.base_url, encoded_user);
 
@@ -214,10 +214,14 @@ impl CardDavClient {
             )));
         }
 
-        self.parse_addressbooks_response(&text, strict)
+        self.parse_addressbooks_response(&text, require_complete)
     }
 
-    fn parse_addressbooks_response(&self, xml: &str, strict: bool) -> Result<Vec<AddressBook>> {
+    fn parse_addressbooks_response(
+        &self,
+        xml: &str,
+        require_complete: bool,
+    ) -> Result<Vec<AddressBook>> {
         let doc = roxmltree::Document::parse(xml)
             .map_err(|e| Error::Server(format!("Failed to parse XML: {e}")))?;
         require_multistatus(&doc)?;
@@ -233,7 +237,7 @@ impl CardDavClient {
             match self.parse_addressbook_response(response) {
                 Ok(Some(book)) => addressbooks.push(book),
                 Ok(None) => {}
-                Err(error) if strict => return Err(error),
+                Err(error) if require_complete => return Err(error),
                 Err(error) => debug!(%error, "Skipping incomplete CardDAV address book"),
             }
         }
@@ -459,39 +463,39 @@ impl CardDavClient {
                         "Incomplete CardDAV discovery: malformed contact identity".into(),
                     ));
                 }
-                let contact = parse_vcard_fields(&unfolded);
+                let contact = parse_unfolded_vcard(&unfolded);
                 let id = if contact.id.is_empty() {
                     format!("href:{}", URL_SAFE_NO_PAD.encode(url.as_str()))
                 } else {
                     contact.id
                 };
-                if id == contact_id {
-                    if contact.name.is_empty() {
-                        return Err(Error::Server(format!(
-                            "Incomplete CardDAV discovery: contact at {href} has no name"
-                        )));
-                    }
-                    if found.is_some() {
-                        return Err(Error::Server(
-                            "Contact ID matches multiple resources; refusing an ambiguous mutation"
-                                .into(),
-                        ));
-                    }
-                    let etag = dav_property(response, dav_ns, "getetag")
-                        .map(str::trim)
-                        .filter(|value| value.starts_with('"') && value.ends_with('"'))
-                        .ok_or_else(|| {
-                            Error::Server(
-                                "Contact has no strong ETag; refusing an unconditional mutation"
-                                    .into(),
-                            )
-                        })?;
-                    found = Some(ContactResource {
-                        href: href.into(),
-                        vcard: vcard_data.into(),
-                        etag: etag.into(),
-                    });
+                if id != contact_id {
+                    continue;
                 }
+                if contact.name.is_empty() {
+                    return Err(Error::Server(format!(
+                        "Incomplete CardDAV discovery: contact at {href} has no name"
+                    )));
+                }
+                if found.is_some() {
+                    return Err(Error::Server(
+                        "Contact ID matches multiple resources; refusing an ambiguous mutation"
+                            .into(),
+                    ));
+                }
+                let etag = dav_property(response, dav_ns, "getetag")
+                    .map(str::trim)
+                    .filter(|value| value.starts_with('"') && value.ends_with('"'))
+                    .ok_or_else(|| {
+                        Error::Server(
+                            "Contact has no strong ETag; refusing an unconditional mutation".into(),
+                        )
+                    })?;
+                found = Some(ContactResource {
+                    href: href.into(),
+                    vcard: vcard_data.into(),
+                    etag: etag.into(),
+                });
             }
         }
 
@@ -666,6 +670,15 @@ fn require_multistatus(doc: &roxmltree::Document<'_>) -> Result<()> {
     Ok(())
 }
 
+fn propstat_succeeded(propstat: roxmltree::Node<'_, '_>) -> bool {
+    propstat
+        .children()
+        .find(|node| node.has_tag_name(("DAV:", "status")))
+        .and_then(|node| node.text())
+        .and_then(|status| status.split_ascii_whitespace().nth(1))
+        == Some("200")
+}
+
 fn required_dav_property<'a, 'input>(
     response: roxmltree::Node<'a, 'input>,
     namespace: &str,
@@ -692,13 +705,7 @@ fn required_dav_property<'a, 'input>(
         .children()
         .filter(|node| node.has_tag_name(("DAV:", "propstat")))
     {
-        let successful = propstat
-            .children()
-            .find(|node| node.has_tag_name(("DAV:", "status")))
-            .and_then(|node| node.text())
-            .and_then(|status| status.split_ascii_whitespace().nth(1))
-            == Some("200");
-        if !successful {
+        if !propstat_succeeded(propstat) {
             continue;
         }
         for property in propstat
@@ -724,11 +731,7 @@ fn dav_property<'a, 'input>(
         .children()
         .filter(|n| n.has_tag_name(("DAV:", "propstat")))
     {
-        let status = propstat
-            .children()
-            .find(|n| n.has_tag_name(("DAV:", "status")))
-            .and_then(|n| n.text());
-        if status.and_then(|s| s.split_ascii_whitespace().nth(1)) != Some("200") {
+        if !propstat_succeeded(propstat) {
             continue;
         }
         if let Some(value) = propstat
@@ -845,11 +848,11 @@ fn vcard_label(label: Option<&str>) -> String {
 
 /// Parse a vCard string into a Contact
 fn parse_vcard(vcard_str: &str) -> Option<Contact> {
-    let contact = parse_vcard_fields(&unfold_vcard(vcard_str));
+    let contact = parse_unfolded_vcard(&unfold_vcard(vcard_str));
     (!contact.name.is_empty()).then_some(contact)
 }
 
-fn parse_vcard_fields(unfolded: &str) -> Contact {
+fn parse_unfolded_vcard(unfolded: &str) -> Contact {
     let mut id = String::new();
     let mut name = String::new();
     let mut emails = Vec::new();
@@ -988,25 +991,18 @@ fn complete_vcard_lines(existing: &str) -> Result<Vec<String>> {
 }
 
 fn validate_complete_vcard(unfolded: &str) -> Result<()> {
-    let lines = unfolded.lines().map(str::trim);
-    if !lines
-        .clone()
+    let mut lines = unfolded.lines().map(str::trim);
+    let has_begin = lines
         .next()
-        .is_some_and(|line| line.eq_ignore_ascii_case("BEGIN:VCARD"))
-        || !lines
-            .clone()
-            .next_back()
-            .is_some_and(|line| line.eq_ignore_ascii_case("END:VCARD"))
-        || lines
-            .clone()
-            .filter(|line| property_name(line).eq_ignore_ascii_case("BEGIN"))
-            .count()
-            != 1
-        || lines
-            .filter(|line| property_name(line).eq_ignore_ascii_case("END"))
-            .count()
-            != 1
-    {
+        .is_some_and(|line| line.eq_ignore_ascii_case("BEGIN:VCARD"));
+    let has_end = lines
+        .next_back()
+        .is_some_and(|line| line.eq_ignore_ascii_case("END:VCARD"));
+    let has_nested_card = lines.any(|line| {
+        let name = property_name(line);
+        name.eq_ignore_ascii_case("BEGIN") || name.eq_ignore_ascii_case("END")
+    });
+    if !has_begin || !has_end || has_nested_card {
         return Err(Error::Server(
             "Expected one complete vCard for update".into(),
         ));

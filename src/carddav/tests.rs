@@ -249,6 +249,31 @@ fn contact_updates_reject_incomplete_or_multiple_cards() {
 }
 
 #[test]
+fn logical_vcard_boundaries_preserve_validation_rules() {
+    for (card, valid) in [
+        ("", false),
+        ("BEGIN:VCARD", false),
+        ("END:VCARD", false),
+        ("BEGIN:VCARD\nEND:VCARD", true),
+        ("begin:vcard\nFN:Name\nend:vcard\n", true),
+        ("BEGIN:VCARD\n\nEND:VCARD", true),
+        ("BEGIN:VCARD\nFN:Name\nEND:VCARD\n\n", false),
+        ("BEGIN:VCARD\nitem1.BEGIN:OTHER\nEND:VCARD", false),
+        ("BEGIN:VCARD\nitem1.END:OTHER\nEND:VCARD", false),
+        ("BEGIN:VCARD\nNOTE:BEGIN:VCARD\nEND:VCARD", true),
+        ("BEGIN:VCARD\nBEGIN:VCARD\nEND:VCARD\nEND:VCARD", false),
+    ] {
+        let result = validate_complete_vcard(card);
+        assert_eq!(result.is_ok(), valid, "{card:?}");
+        if let Err(error) = result {
+            assert!(
+                matches!(error, Error::Server(message) if message == "Expected one complete vCard for update")
+            );
+        }
+    }
+}
+
+#[test]
 fn contact_updates_recognize_folded_names_and_preserve_untouched_lines() {
     let original = "BE\r\n GIN:VCARD\r\nU\r\n ID:contact\r\nF\r\n N:Old\r\nX-CUSTOM:one\r\n two\r\nEN\r\n D:VCARD\r\n";
     let updated = update_vcard(
