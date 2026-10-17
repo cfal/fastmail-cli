@@ -789,9 +789,10 @@ accept arbitrary hosts unless restricted with repeated `--allowed-host HOST`
 options (hostnames without ports). Set your public hostname when using a proxy,
 and preserve the original `Host` header. Cross-origin browser access is rejected.
 
-The token is resolved on first query rather than at startup, so an expired one
-shows up as an error in the response pane rather than a server that won't boot —
-run `fastmail auth` to refresh it, or ask `session` first. **Introspection needs
+Credentials are captured at server startup; authentication is deferred until
+needed, so an expired token appears as a request error rather than preventing
+startup. After `fastmail auth` changes credentials, restart the server. Use
+`session` to check the captured credentials. **Introspection needs
 no token**: it is answered from the schema without touching Fastmail, so
 GraphiQL's docs, autocomplete and explorer work before you have working
 credentials. Queries that select any real field still authenticate as normal.

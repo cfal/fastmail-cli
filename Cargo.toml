@@ -2,6 +2,7 @@
 name = "fastmail-cli"
 version = "4.0.5"
 edition = "2024"
+rust-version = "1.98.1"
 description = "CLI for Fastmail's JMAP API"
 repository = "https://github.com/cfal/fastmail-cli"
 license = "MIT"

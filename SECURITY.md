@@ -156,3 +156,10 @@ Two scanner exceptions expire on 2026-12-13:
 advisories fail CI. npm dependencies are audited without exceptions. Dependency
 presence scans and these reachability assessments do not replace a complete
 source audit or runtime isolation.
+
+Reassessed on 2026-10-17: async-graphql 7.2.1 and 8.0.0-rc.5 both constrain
+`lru` to `^0.16.2`, below patched 0.18.2. xberg 1.3.10 still enables biblatex
+0.12 with its `office` feature, and biblatex still depends on `paste`. Neither
+has a registry-only upgrade that clears its exception while preserving these
+features. Track upstream constraint/macro migrations before the existing expiry;
+do not widen the exceptions or upgrade to a prerelease merely to suppress them.
