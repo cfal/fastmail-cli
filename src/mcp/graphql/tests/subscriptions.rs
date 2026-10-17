@@ -1,6 +1,46 @@
 use super::*;
 
 #[tokio::test]
+async fn subscription_reports_expired_history_and_ends() {
+    use async_graphql::futures_util::StreamExt;
+    use wiremock::matchers::body_string_contains;
+    let server = mock_server(0).await;
+    Mock::given(body_string_contains(r#""ids":[]"#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Email/get",{"accountId":"acct1","state":"present","list":[],"notFound":[]},"s0"]]})))
+        .with_priority(1).expect(2).mount(&server).await;
+    Mock::given(body_string_contains("Email/changes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"methodResponses":[["error",{"type":"cannotCalculateChanges"},"c0"]]}),
+        ))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let schema = build_schema();
+    let mut stream = schema.execute_stream(request(
+        "subscription { emails(pollSeconds: 1) { id } }",
+        client_for(&server),
+        CardDavCreds::default(),
+    ));
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        response
+            .errors
+            .iter()
+            .any(|error| error.message.contains("resync required"))
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn subscription_rejects_zero_poll_without_network_access() {
     use async_graphql::futures_util::StreamExt;
     let server = mock_server(0).await;

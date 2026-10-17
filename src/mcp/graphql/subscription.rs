@@ -36,7 +36,9 @@ impl SubscriptionRoot {
     /// flag and folder changes to existing mail are not arrivals.
     ///
     /// Transient failures are retried internally and never reach the
-    /// subscriber. The stream ends only when the token stops authenticating.
+    /// subscriber. Lost change history, unrecoverable protocol limits, or a
+    /// token that stops authenticating end the stream with an error. Query for
+    /// missed mail before starting a new subscription.
     ///
     /// Set `full` to select body and attachment fields. Unlike a query, a
     /// subscription disables record caching so lazily fetched bodies and
@@ -87,6 +89,14 @@ impl SubscriptionRoot {
             };
             loop {
                 match watcher.next_arrivals().await {
+                    Ok(arrivals) if arrivals.resynced => {
+                        return Some((
+                            Err(async_graphql::Error::new(
+                                "Arrival history expired; resync required. Query for missed mail before restarting the subscription.",
+                            )),
+                            Watching::Done,
+                        ));
+                    }
                     // A wake-up that turned up nothing is normal — keep
                     // waiting rather than emitting an empty tick.
                     Ok(arrivals) if arrivals.emails.is_empty() => continue,
