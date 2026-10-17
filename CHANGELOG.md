@@ -24,6 +24,8 @@
   body fetches for status messages.
 - Bound and validate arrival-change paging. Stop subscriptions explicitly when
   change history expires instead of silently losing arrivals.
+- Require exactly one expanded subscription root-field occurrence, including
+  aliases, fragments and repeats, to isolate per-emission attachment budgets.
 - Preserve cursor intervals in forward/backward pagination, issue unique
   attachment-occurrence cursors, and retain match-all operands inside OR/NOT.
 - Bound aggregate GraphQL attachment input and serialized output, share downloads,
@@ -36,9 +38,9 @@
   Mutation and compose-preview locking remains unchanged.
 - Reject ambiguous or incompletely discovered CardDAV mutation targets and use
   unique private temporary files for concurrent config saves.
-- Reject non-object HTTP GraphQL variables, invalid download formats and oversized
-  local HTML input. Serialize fallback JSON errors correctly and correct stale SDL
-  and credential documentation.
+- Reject scalar/array GraphQL variables, invalid download formats and oversized
+  local HTML input; preserve null variables as omission. Serialize fallback JSON
+  errors correctly and correct stale SDL and credential documentation.
 - Infer image MIME types for CLI attachments, including PNG, JPEG, GIF, WebP,
   BMP, TIFF, HEIC, and ICO, instead of sending them as `application/octet-stream`.
   Selectively ported from upstream [#76](https://github.com/radiosilence/fastmail-cli/pull/76).
