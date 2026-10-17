@@ -15,10 +15,12 @@
 
 - Validate JMAP method, call ID, account, and complete get results; require
   positive evidence for writes. Confirmed submission remains successful when
-  automatic Sent filing fails, with a warning not to resend. Uncertain writes
-  are never retried automatically.
-- Resolve system folders by unique role and pin reply identities. Reject
-  ambiguous or incomplete CardDAV mutation discovery while preserving
+  automatic Sent filing fails: `sendDraft` returns `filingWarning`, while ordinary
+  sends log a warning visible with `RUST_LOG=warn`. Uncertain writes are never
+  retried automatically.
+- Resolve internal Drafts, Sent, Junk, and Trash destinations by unique role and
+  pin reply identities. User-supplied mailbox names retain their precedence.
+  Reject ambiguous or incomplete CardDAV mutation discovery while preserving
   best-effort listing and untouched vCard properties.
 - Use independent private temporary files for concurrent configuration saves.
   Reject invalid attachment download formats, oversized local HTML input, and
@@ -39,6 +41,8 @@
   Oversized change windows stop the watcher without advancing its checkpoint.
   Subscriptions require exactly one expanded root-field occurrence, including
   aliases, fragments, and repeats.
+
+Source builds require Rust 1.98.1 or newer.
 
 Four platform archives include licenses; `SHA256SUMS` covers all four archives.
 The release also publishes Linux amd64/arm64 container manifests.
