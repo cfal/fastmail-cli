@@ -276,7 +276,7 @@ enum Commands {
         output: Option<String>,
 
         /// Output format: raw (save files) or json (extract text)
-        #[arg(short, long)]
+        #[arg(short, long, value_parser = ["raw", "json"])]
         format: Option<String>,
 
         /// Max size for images (e.g., 500K, 1M). Images larger than this are resized.
@@ -921,6 +921,16 @@ async fn run_command(command: Commands) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_rejects_unknown_formats_before_execution() {
+        for format in ["raw", "json"] {
+            assert!(
+                Cli::try_parse_from(["fastmail", "download", "id", "--format", format]).is_ok()
+            );
+        }
+        assert!(Cli::try_parse_from(["fastmail", "download", "id", "--format", "jsno"]).is_err());
+    }
 
     #[test]
     fn command_definitions_are_consistent() {
