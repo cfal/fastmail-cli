@@ -7,6 +7,7 @@ use crate::jmap::prefixed_subject;
 use crate::models::{EmailAddress, Identity};
 use crate::util::parse_addresses;
 
+use super::attachments::{self, AttachmentInput, GqlUploadedAttachment};
 use super::types::*;
 
 pub struct MutationRoot;
@@ -30,6 +31,8 @@ impl MutationRoot {
         #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
             String,
         >,
+        #[graphql(desc = "Files as base64 or existing blobId; at most 128 files and 25 MiB total")]
+        attachments: Option<Vec<AttachmentInput>>,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
@@ -38,7 +41,16 @@ impl MutationRoot {
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let mut attachments = match attachments::prepare(attachments.unwrap_or_default()) {
+            Ok(attachments) => attachments,
+            Err(message) => return Ok(GqlComposeResult::failed(message)),
+        };
         let mut client = client.lock().await;
+        if matches!(action, SendAction::Preview)
+            && let Err(message) = attachments::measure_preview(&client, &mut attachments).await
+        {
+            return Ok(GqlComposeResult::failed(message));
+        }
         let identity = client.resolve_sender(from.as_deref()).await;
         let sender = identity.as_ref().ok();
         let binding = compose_binding(
@@ -48,6 +60,7 @@ impl MutationRoot {
                 "to": to_addrs, "cc": cc_addrs, "bcc": bcc_addrs,
                 "subject": subject, "body": body, "html": html_body,
                 "from": from, "sender": sender,
+                "attachments": attachments::binding(&attachments),
             }),
         )?;
         let params = [binding.as_str()];
@@ -57,6 +70,7 @@ impl MutationRoot {
             let mut preview =
                 format_send_preview(&to_addrs, &cc_addrs, &bcc_addrs, &subject, &body);
             append_compose_details(&mut preview, sender, html_body.as_deref());
+            attachments::append_preview(&mut preview, &attachments);
             return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
@@ -82,6 +96,10 @@ impl MutationRoot {
                     attachments: vec![],
                 },
                 Some(identity),
+                attachments
+                    .into_iter()
+                    .map(|attachment| attachment.data)
+                    .collect(),
             )
             .await
         {
@@ -106,12 +124,23 @@ impl MutationRoot {
         #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
             String,
         >,
+        #[graphql(desc = "Files as base64 or existing blobId; at most 128 files and 25 MiB total")]
+        attachments: Option<Vec<AttachmentInput>>,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let mut attachments = match attachments::prepare(attachments.unwrap_or_default()) {
+            Ok(attachments) => attachments,
+            Err(message) => return Ok(GqlComposeResult::failed(message)),
+        };
         let mut client = client.lock().await;
+        if matches!(action, SendAction::Preview)
+            && let Err(message) = attachments::measure_preview(&client, &mut attachments).await
+        {
+            return Ok(GqlComposeResult::failed(message));
+        }
 
         let original = client.get_email(&email_id).await?;
         let reply_all = all.unwrap_or(false);
@@ -138,6 +167,7 @@ impl MutationRoot {
                 "subject": subject, "body": body, "html": html_body,
                 "from": from, "sender": sender, "all": reply_all,
                 "message_id": original.message_id, "references": original.references,
+                "attachments": attachments::binding(&attachments),
             }),
         )?;
         let params = [binding.as_str()];
@@ -160,6 +190,7 @@ impl MutationRoot {
                 body
             );
             append_compose_details(&mut preview, sender, html_body.as_deref());
+            attachments::append_preview(&mut preview, &attachments);
             return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
@@ -184,6 +215,10 @@ impl MutationRoot {
                     attachments: vec![],
                 },
                 Some(identity),
+                attachments
+                    .into_iter()
+                    .map(|attachment| attachment.data)
+                    .collect(),
             )
             .await
         {
@@ -208,13 +243,24 @@ impl MutationRoot {
         #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
             String,
         >,
+        #[graphql(desc = "Files as base64 or existing blobId; at most 128 files and 25 MiB total")]
+        attachments: Option<Vec<AttachmentInput>>,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
         let body_str = body.as_deref().unwrap_or("");
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let mut attachments = match attachments::prepare(attachments.unwrap_or_default()) {
+            Ok(attachments) => attachments,
+            Err(message) => return Ok(GqlComposeResult::failed(message)),
+        };
         let mut client = client.lock().await;
+        if matches!(action, SendAction::Preview)
+            && let Err(message) = attachments::measure_preview(&client, &mut attachments).await
+        {
+            return Ok(GqlComposeResult::failed(message));
+        }
 
         let original = client.get_email(&email_id).await?;
         let to_addrs = parse_addresses(&to);
@@ -234,6 +280,7 @@ impl MutationRoot {
                 "from": from, "sender": sender,
                 "original_body": original.text_content(), "original_from": original.from,
                 "original_date": original.received_at, "original_subject": original.subject,
+                "attachments": attachments::binding(&attachments),
             }),
         )?;
         let params = [binding.as_str()];
@@ -257,6 +304,7 @@ impl MutationRoot {
                 original_body,
             );
             append_compose_details(&mut preview, sender, html_body.as_deref());
+            attachments::append_preview(&mut preview, &attachments);
             return Ok(GqlComposeResult::previewed(preview, nonce));
         }
 
@@ -281,12 +329,42 @@ impl MutationRoot {
                     attachments: vec![],
                 },
                 Some(identity),
+                attachments
+                    .into_iter()
+                    .map(|attachment| attachment.data)
+                    .collect(),
             )
             .await
         {
             Ok(email_id) => Ok(GqlComposeResult::completed(email_id)),
             Err(e) => Ok(GqlComposeResult::failed(e.to_string())),
         }
+    }
+
+    /// Upload a file without sending mail, then reuse its blobId in PREVIEW and CONFIRM.
+    /// The 2 MiB HTTP JSON limit still applies, including to base64; use variables rather than query literals.
+    async fn upload_attachment(
+        &self,
+        ctx: &Context<'_>,
+        name: String,
+        content_type: Option<String>,
+        base64: String,
+    ) -> Result<GqlUploadedAttachment> {
+        let (name, content_type) = attachments::name_and_type(name, content_type)?;
+        let bytes = attachments::decode(&base64, attachments::MAX_COMPOSE_ATTACHMENT_BYTES)?;
+        let size = bytes.len() as u64;
+        let client = ctx
+            .data::<crate::mcp::graphql::SharedClient>()?
+            .lock()
+            .await
+            .clone();
+        let blob_id = client.upload_blob(bytes, &content_type).await?;
+        Ok(GqlUploadedAttachment {
+            blob_id,
+            name,
+            content_type,
+            size,
+        })
     }
 
     /// Move an email to a different mailbox/folder.

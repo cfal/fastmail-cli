@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- GraphQL/MCP outgoing attachments for send, reply, and forward, supplied as
+  inline base64 or existing blob IDs, plus an `uploadAttachment` mutation.
+  Adapted from upstream #76/#78 with bounded preview downloads, ordered
+  SHA-256 confirmation bindings, and unchanged public Rust APIs and HTTP limits.
+
 ### Fixed
 
 - Infer image MIME types for CLI attachments, including PNG, JPEG, GIF, WebP,

@@ -5,6 +5,8 @@
 
 use async_graphql::Schema;
 
+mod attachments;
+
 pub mod connection;
 pub mod filter;
 mod input_limits;

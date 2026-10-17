@@ -1579,6 +1579,7 @@ dependencies = [
  "http",
  "http-body-util",
  "image",
+ "mime",
  "open",
  "percent-encoding",
  "pulldown-cmark",

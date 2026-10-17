@@ -937,6 +937,49 @@ connections, threads, and subscription arrivals, including through MCP's
 `graphql` tool. `textBody` and `htmlBody` remain raw joined JMAP values, not
 converted reading views.
 
+### Sending Attachments Through GraphQL/MCP
+
+`sendEmail`, `replyToEmail`, and `forwardEmail` accept
+`attachments: [AttachmentInput!]`. Each input needs a `name`, optional
+`contentType` (inferred from the filename otherwise), and exactly one of:
+
+- `base64`: the file bytes, encoded as standard base64.
+- `blobId`: an existing blob in this account, reused without uploading it again.
+  Use an email attachment's `blobId` or one returned by `uploadAttachment`.
+
+MIME types must be concrete `type/subtype` values, without parameters,
+wildcards, or `multipart/*` types.
+
+```graphql
+mutation {
+  sendEmail(
+    action: PREVIEW
+    to: "alice@example.com"
+    subject: "Notes"
+    body: "Please review."
+    attachments: [{ name: "notes.txt", base64: "aGVsbG8=" }]
+  ) { preview confirmationToken }
+}
+```
+
+Show the preview, then repeat the arguments with `action: CONFIRM` (or `DRAFT`)
+and its `confirmationToken`. Names, MIME types, order, and exact bytes/blob IDs
+are bound to that approval, along with the sender, account, and operation.
+PREVIEW uploads nothing; it downloads existing blobs only to measure their size.
+CONFIRM/DRAFT uploads inline bytes and directly references existing blobs.
+
+`uploadAttachment(name:, contentType:, base64:)` uploads without creating or
+sending mail and returns `{ blobId name contentType size }`. Reuse its `blobId`
+to avoid supplying inline bytes twice. Uploading is itself a server write.
+
+Compose attachments are limited to 128 files and 25 MiB combined decoded size.
+HTTP JSON remains limited to 2 MiB, so a new inline upload must be smaller than
+roughly 1.5 MiB raw, including request overhead. Use GraphQL variables to avoid
+the separate 64 KiB query-document limit. Larger files can be uploaded through
+the existing authenticated `/cli/v1/upload` binary endpoint and then referenced
+by `blobId`; the 25 MiB compose cap still applies. Stdio also enforces the compose
+cap. These additions do not change CLI `--attachment` behavior or its limits.
+
 ### Composable filters
 
 `EmailFilter` mirrors JMAP's filter tree (RFC 8620 §5.5) rather than flattening

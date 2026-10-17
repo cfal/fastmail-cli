@@ -191,12 +191,23 @@ is only computed when selected.
 
 MUTATIONS — sendEmail, replyToEmail and forwardEmail all take
 `action: PREVIEW | CONFIRM | DRAFT`. PREVIEW sends nothing and returns a
-confirmationToken; CONFIRM repeats the same to/subject/body plus that token, and
-is rejected if they differ. Recipients are comma-separated strings, not lists.
+confirmationToken; CONFIRM repeats exactly the same arguments plus that token,
+and is rejected if any differ. Recipients are comma-separated strings, not lists.
   sendEmail(action: SendAction!, to: String!, subject: String!, body: String!,
             cc: String, bcc: String, from: String, htmlBody: String,
-            confirmationToken: String): ComposeResult!
+            attachments: [AttachmentInput!], confirmationToken: String): ComposeResult!
   ComposeResult { success emailId preview confirmationToken error }
+
+Attachments also work on replyToEmail and forwardEmail:
+  AttachmentInput { name contentType base64 blobId }  # exactly one of base64/blobId
+  uploadAttachment(name: String!, contentType: String, base64: String!): UploadedAttachment!
+  UploadedAttachment { blobId name contentType size }
+PREVIEW lists names, types, byte sizes and content fingerprints/blob IDs; it
+uploads nothing. CONFIRM/DRAFT bind the ordered attachment set. At most 128 files
+and 25 MiB total. HTTP JSON stays limited to 2 MiB, including base64; variables
+avoid the separate 64 KiB query-document limit. Larger files must already exist
+as blobs (including uploads through /cli/v1/upload). Blob previews download to
+measure size; confirmed blobs are reused, not uploaded again.
 
 EXAMPLES
 ```

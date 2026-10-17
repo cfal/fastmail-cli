@@ -145,7 +145,7 @@ async fn compose(
     response.data.into_json().unwrap()[field].clone()
 }
 
-async fn compose_server() -> MockServer {
+pub(super) async fn compose_server() -> MockServer {
     let server = mock_server(1).await;
     Mock::given(|req: &wiremock::Request| {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();

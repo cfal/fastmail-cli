@@ -1,5 +1,78 @@
 use super::*;
 
+#[tokio::test]
+async fn blob_measurement_counts_known_and_chunked_bodies_with_a_bound() {
+    use async_graphql::futures_util::stream;
+    use axum::{Router, body::Body, routing::get};
+    let router = Router::new()
+        .route("/jmap/download/known", get(|| async { "0123456789" }))
+        .route("/jmap/download/empty", get(|| async { "" }))
+        .route(
+            "/jmap/download/stream",
+            get(|| async {
+                Body::from_stream(stream::iter([
+                    Ok::<_, std::io::Error>("01234"),
+                    Ok("56789"),
+                ]))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let client =
+        JmapClient::with_test_session(&format!("http://127.0.0.1:{}/jmap", address.port()));
+    for id in ["known", "stream"] {
+        for (limit, expected) in [(0, 1), (4, 5), (9, 10), (10, 10), (11, 10)] {
+            assert_eq!(
+                client.blob_size(id, limit).await.unwrap(),
+                expected,
+                "{id}: {limit}"
+            );
+        }
+        assert_eq!(client.download_blob(id).await.unwrap(), b"0123456789");
+    }
+    assert_eq!(client.blob_size("empty", 0).await.unwrap(), 0);
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn blob_measurement_preserves_remote_basic_auth_and_error_handling() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path, query_param},
+    };
+    let server = MockServer::start().await;
+    let remote =
+        crate::remote::HttpServer::new(&server.uri(), Some("login"), Some("password")).unwrap();
+    let mut client = JmapClient::via_server(remote);
+    let mut session = create_test_session(vec!["urn:ietf:params:jmap:mail"]);
+    session.download_url = format!("{}/cli/v1/download?blob_id={{blobId}}", server.uri());
+    client.session = Some(session);
+    Mock::given(method("GET"))
+        .and(path("/cli/v1/download"))
+        .and(query_param("blob_id", "blob-id"))
+        .and(header("authorization", "Basic bG9naW46cGFzc3dvcmQ="))
+        .respond_with(ResponseTemplate::new(200).set_body_string("data"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/cli/v1/download"))
+        .and(query_param("blob_id", "denied"))
+        .and(header("authorization", "Basic bG9naW46cGFzc3dvcmQ="))
+        .respond_with(ResponseTemplate::new(401).set_body_string("do not expose this response"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(client.blob_size("blob-id", 4).await.unwrap(), 4);
+    let error = client.blob_size("denied", 4).await.unwrap_err().to_string();
+    assert!(error.contains("401"), "{error}");
+    assert!(!error.contains("do not expose"));
+}
+
 #[test]
 fn subject_prefixes_preserve_case_whitespace_and_missing_subjects() {
     for (subject, reply, forward) in [
@@ -634,6 +707,7 @@ async fn compose_tracing_is_shared_and_skips_private_inputs() {
                         None,
                         params(),
                         identity(),
+                        vec![],
                     )
                     .await
             } else {
@@ -650,6 +724,7 @@ async fn compose_tracing_is_shared_and_skips_private_inputs() {
                         vec![],
                         params(),
                         identity(),
+                        vec![],
                     )
                     .await
             } else {
@@ -666,6 +741,7 @@ async fn compose_tracing_is_shared_and_skips_private_inputs() {
                         "private body",
                         params(),
                         identity(),
+                        vec![],
                     )
                     .await
             } else {

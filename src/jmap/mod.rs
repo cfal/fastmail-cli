@@ -115,6 +115,27 @@ pub struct AttachmentData {
     pub data: Vec<u8>,
 }
 
+pub(crate) enum AttachmentContent {
+    Bytes(Vec<u8>),
+    Blob(String),
+}
+
+pub(crate) struct OutgoingAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub content: AttachmentContent,
+}
+
+impl From<AttachmentData> for OutgoingAttachment {
+    fn from(attachment: AttachmentData) -> Self {
+        Self {
+            filename: attachment.filename,
+            content_type: attachment.content_type,
+            content: AttachmentContent::Bytes(attachment.data),
+        }
+    }
+}
+
 /// Common parameters for compose operations (send, reply, forward)
 pub struct ComposeParams<'a> {
     pub cc: Vec<EmailAddress>,
@@ -140,7 +161,7 @@ struct EmailDraft<'a> {
     subject: &'a str,
     body: &'a str,
     html_body: Option<&'a str>,
-    attachments: Vec<AttachmentData>,
+    attachments: Vec<OutgoingAttachment>,
     threading: Option<ThreadingHeaders>,
 }
 
@@ -1484,7 +1505,10 @@ impl JmapClient {
         // Upload attachments and collect blob IDs
         let mut uploaded_attachments: Vec<UploadedAttachment> = Vec::new();
         for att in draft.attachments {
-            let blob_id = self.upload_blob(att.data, &att.content_type).await?;
+            let blob_id = match att.content {
+                AttachmentContent::Bytes(data) => self.upload_blob(data, &att.content_type).await?,
+                AttachmentContent::Blob(id) => id,
+            };
             uploaded_attachments.push(UploadedAttachment {
                 blob_id,
                 filename: att.filename,
@@ -1523,14 +1547,15 @@ impl JmapClient {
         in_reply_to: Option<&str>,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        self.send_email_with_identity(to, subject, body, in_reply_to, params, None)
+        self.send_email_with_identity(to, subject, body, in_reply_to, params, None, vec![])
             .await
     }
 
     #[instrument(
         name = "send_email",
-        skip(self, to, subject, body, params, resolved_identity)
+        skip(self, to, subject, body, params, resolved_identity, attachments)
     )]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_email_with_identity(
         &mut self,
         to: Vec<EmailAddress>,
@@ -1539,6 +1564,7 @@ impl JmapClient {
         in_reply_to: Option<&str>,
         params: ComposeParams<'_>,
         resolved_identity: Option<Result<Identity>>,
+        attachments: Vec<OutgoingAttachment>,
     ) -> Result<String> {
         let ctx = self
             .prepare_compose(params.from, params.draft, resolved_identity)
@@ -1552,7 +1578,12 @@ impl JmapClient {
                 subject,
                 body,
                 html_body: params.html_body.as_deref(),
-                attachments: params.attachments,
+                attachments: params
+                    .attachments
+                    .into_iter()
+                    .map(Into::into)
+                    .chain(attachments)
+                    .collect(),
                 threading: in_reply_to.map(|id| ThreadingHeaders {
                     in_reply_to: vec![id.to_string()],
                     references: vec![],
@@ -1602,6 +1633,30 @@ impl JmapClient {
     /// Download a blob (attachment) by ID
     #[instrument(skip(self))]
     pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>> {
+        let resp = self.fetch_blob(blob_id).await?;
+        crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await
+    }
+
+    /// Count streamed bytes without retaining the blob; over-limit results are `limit + 1`.
+    pub(crate) async fn blob_size(&self, blob_id: &str, limit: usize) -> Result<usize> {
+        let mut resp = self.fetch_blob(blob_id).await?;
+        if resp
+            .content_length()
+            .is_some_and(|size| size > limit as u64)
+        {
+            return Ok(limit.saturating_add(1));
+        }
+        let mut size = 0;
+        while let Some(chunk) = resp.chunk().await? {
+            if chunk.len() > limit - size {
+                return Ok(limit.saturating_add(1));
+            }
+            size += chunk.len();
+        }
+        Ok(size)
+    }
+
+    async fn fetch_blob(&self, blob_id: &str) -> Result<reqwest::Response> {
         let account_id = self.account_id()?;
         let session = self.session()?;
 
@@ -1629,7 +1684,7 @@ impl JmapClient {
         }
 
         crate::util::check_response_status(&resp)?;
-        crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await
+        Ok(resp)
     }
 
     /// Upload a blob (for attachments) and return the blobId
@@ -1683,13 +1738,13 @@ impl JmapClient {
         to: Vec<EmailAddress>,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        self.reply_email_with_identity(original, body, to, params, None)
+        self.reply_email_with_identity(original, body, to, params, None, vec![])
             .await
     }
 
     #[instrument(
         name = "reply_email",
-        skip(self, original, to, body, params, resolved_identity)
+        skip(self, original, to, body, params, resolved_identity, attachments)
     )]
     pub(crate) async fn reply_email_with_identity(
         &mut self,
@@ -1698,6 +1753,7 @@ impl JmapClient {
         to: Vec<EmailAddress>,
         params: ComposeParams<'_>,
         resolved_identity: Option<Result<Identity>>,
+        attachments: Vec<OutgoingAttachment>,
     ) -> Result<String> {
         let ctx = self
             .prepare_compose(params.from, params.draft, resolved_identity)
@@ -1729,7 +1785,12 @@ impl JmapClient {
                 subject: &subject,
                 body,
                 html_body: params.html_body.as_deref(),
-                attachments: params.attachments,
+                attachments: params
+                    .attachments
+                    .into_iter()
+                    .map(Into::into)
+                    .chain(attachments)
+                    .collect(),
                 threading: Some(ThreadingHeaders {
                     in_reply_to: original.message_id.clone().unwrap_or_default(),
                     references,
@@ -1747,13 +1808,13 @@ impl JmapClient {
         body: &str,
         params: ComposeParams<'_>,
     ) -> Result<String> {
-        self.forward_email_with_identity(original, to, body, params, None)
+        self.forward_email_with_identity(original, to, body, params, None, vec![])
             .await
     }
 
     #[instrument(
         name = "forward_email",
-        skip(self, original, to, body, params, resolved_identity)
+        skip(self, original, to, body, params, resolved_identity, attachments)
     )]
     pub(crate) async fn forward_email_with_identity(
         &mut self,
@@ -1762,6 +1823,7 @@ impl JmapClient {
         body: &str,
         params: ComposeParams<'_>,
         resolved_identity: Option<Result<Identity>>,
+        attachments: Vec<OutgoingAttachment>,
     ) -> Result<String> {
         let ctx = self
             .prepare_compose(params.from, params.draft, resolved_identity)
@@ -1799,7 +1861,12 @@ impl JmapClient {
                 subject: &subject,
                 body: &full_body,
                 html_body: params.html_body.as_deref(),
-                attachments: params.attachments,
+                attachments: params
+                    .attachments
+                    .into_iter()
+                    .map(Into::into)
+                    .chain(attachments)
+                    .collect(),
                 threading: None,
             },
         )

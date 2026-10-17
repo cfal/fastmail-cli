@@ -55,6 +55,21 @@ dedicated unprivileged account/container with OS resource limits for a shared
 service. Extraction disables disk caching and OCR and requests a 60-second
 cooperative timeout; this cannot forcibly terminate every parser.
 
+GraphQL/MCP compose inputs allow at most 128 attachments and 25 MiB of combined
+decoded bytes, including existing blobs. Names and MIME types are bounded to
+255 bytes and reject control characters; MIME types require concrete
+`type/subtype` syntax without parameters or multipart types. Blob IDs use the
+JMAP Id alphabet.
+The existing 2 MiB HTTP JSON limit also applies to inline base64 and
+`uploadAttachment`; this permits less than roughly 1.5 MiB of new raw bytes per
+HTTP request. Query literals retain the separate 64 KiB document limit.
+PREVIEW measures blobs by bounded streaming reads without retaining their bytes;
+`Content-Length` can reject an oversized blob early but cannot approve it alone.
+Ordered names/types and SHA-256 byte digests or immutable blob IDs are bound to
+the existing account/operation-specific one-shot approval. No compose uploads or
+mail creation happen before confirmation. The explicit `uploadAttachment`
+mutation is a separate write and does not require a compose approval.
+
 Readable message bodies use local HTML-to-Markdown/text conversion, not document
 ingestion or a browser. They never fetch linked resources, CID images, data-URL
 images, or stylesheets, and never execute scripts. Image source URLs are omitted
