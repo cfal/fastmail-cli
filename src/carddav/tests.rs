@@ -250,7 +250,7 @@ async fn contact_server(vcard: &str, etag: &str) -> (CardDavClient, wiremock::Mo
     let mut client = CardDavClient::try_new("user".into(), "password".into()).unwrap();
     client.base_url = server.uri();
     Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(207).set_body_string(
-        r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#
+        r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
     )).mount(&server).await;
     Mock::given(method("REPORT")).respond_with(ResponseTemplate::new(207).set_body_string(format!(
         r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/contact.vcf</d:href><d:propstat><d:prop><d:getetag>{etag}</d:getetag><c:address-data><![CDATA[{vcard}]]></c:address-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
@@ -268,7 +268,7 @@ async fn ambiguous_or_incomplete_contact_discovery_never_writes() {
         let (client, server) =
             contact_server("BEGIN:VCARD\nUID:contact\nFN:Name\nEND:VCARD\n", "\"v1\"").await;
         Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(207).set_body_string(
-            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response><d:response><d:href>/other/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response><d:response><d:href>/other/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
         )).with_priority(1).mount(&server).await;
         let body = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/other/copy.vcf</d:href><d:propstat><d:prop><d:getetag>"v2"</d:getetag><c:address-data>BEGIN:VCARD
 UID:contact
@@ -299,6 +299,107 @@ END:VCARD
                 "{message}"
             );
         }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method != "PUT" && request.method != "DELETE")
+        );
+    }
+}
+
+#[tokio::test]
+async fn partial_multistatus_discovery_never_authorizes_a_contact_mutation() {
+    use wiremock::{Mock, ResponseTemplate, matchers::method};
+    let contact = "BEGIN:VCARD\nUID:contact\nFN:Name\nEND:VCARD\n";
+    for (verb, good_property, bad_property, status) in [
+        (
+            "PROPFIND",
+            "<d:resourcetype><c:addressbook/></d:resourcetype>",
+            "<d:resourcetype/>",
+            "HTTP/1.1 403 Forbidden",
+        ),
+        (
+            "PROPFIND",
+            "<d:resourcetype><c:addressbook/></d:resourcetype>",
+            "<d:resourcetype/>",
+            "",
+        ),
+        (
+            "PROPFIND",
+            "<d:resourcetype><c:addressbook/></d:resourcetype>",
+            "",
+            "HTTP/1.1 200 OK",
+        ),
+        ("REPORT", "", "<c:address-data/>", "HTTP/1.1 404 Not Found"),
+        ("REPORT", "", "<c:address-data/>", ""),
+        (
+            "REPORT",
+            "",
+            "<d:getetag>\"v2\"</d:getetag>",
+            "HTTP/1.1 200 OK",
+        ),
+        ("REPORT", "", "<c:address-data/>", "HTTP/1.1 200 OK"),
+        (
+            "REPORT",
+            "",
+            "<c:address-data>BEGIN:VCARD\nUID:contact\nEND:VCARD</c:address-data>",
+            "HTTP/1.1 200 OK",
+        ),
+        (
+            "REPORT",
+            "",
+            "<c:address-data>UID:contact\nFN:Name</c:address-data>",
+            "HTTP/1.1 200 OK",
+        ),
+        (
+            "REPORT",
+            "",
+            "<c:address-data>BEGIN:VCARD\nUID:contact\nUID:other\nFN:Name\nEND:VCARD</c:address-data>",
+            "HTTP/1.1 200 OK",
+        ),
+    ] {
+        let (client, server) = contact_server(contact, "\"v1\"").await;
+        let good_property = if verb == "REPORT" {
+            format!("<d:getetag>\"v1\"</d:getetag><c:address-data>{contact}</c:address-data>")
+        } else {
+            good_property.into()
+        };
+        let good_href = if verb == "REPORT" {
+            "/books/contact.vcf"
+        } else {
+            "/books/"
+        };
+        let body = format!(
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+            <d:response><d:href>{good_href}</d:href><d:propstat><d:prop>{good_property}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+            <d:response><d:href>/other/</d:href><d:propstat><d:prop>{bad_property}</d:prop><d:status>{status}</d:status></d:propstat></d:response>
+        </d:multistatus>"#
+        );
+        Mock::given(method(verb))
+            .respond_with(ResponseTemplate::new(207).set_body_string(body))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        assert!(
+            client
+                .update_contact(
+                    "contact",
+                    &ContactFields {
+                        title: Some("Changed"),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .is_err(),
+            "{verb} {bad_property} {status}"
+        );
+        assert!(
+            client.delete_contact("contact").await.is_err(),
+            "{verb} {bad_property} {status}"
+        );
         assert!(
             server
                 .received_requests()

@@ -216,31 +216,35 @@ impl CardDavClient {
     fn parse_addressbooks_response(&self, xml: &str) -> Result<Vec<AddressBook>> {
         let doc = roxmltree::Document::parse(xml)
             .map_err(|e| Error::Server(format!("Failed to parse XML: {e}")))?;
+        require_multistatus(&doc)?;
 
         let dav_ns = "DAV:";
         let carddav_ns = "urn:ietf:params:xml:ns:carddav";
         let mut addressbooks = Vec::new();
 
         for response in doc
-            .descendants()
+            .root_element()
+            .children()
             .filter(|n| n.has_tag_name((dav_ns, "response")))
         {
             let href = response
-                .descendants()
+                .children()
                 .find(|n| n.has_tag_name((dav_ns, "href")))
                 .and_then(|n| n.text())
-                .unwrap_or_default();
+                .filter(|href| !href.is_empty())
+                .ok_or_else(|| {
+                    Error::Server("Incomplete CardDAV discovery: missing resource href".into())
+                })?;
+            self.resource_url(href)?;
 
             // Check if this is an addressbook (has carddav:addressbook resourcetype)
-            let is_addressbook = response
-                .descendants()
+            let resource_type = required_dav_property(response, dav_ns, "resourcetype")?;
+            let is_addressbook = resource_type
+                .children()
                 .any(|n| n.has_tag_name((carddav_ns, "addressbook")));
 
             if is_addressbook && !href.is_empty() {
-                let displayname = response
-                    .descendants()
-                    .find(|n| n.has_tag_name((dav_ns, "displayname")))
-                    .and_then(|n| n.text());
+                let displayname = dav_property(response, dav_ns, "displayname");
 
                 let name = displayname.map(|s| s.to_string()).unwrap_or_else(|| {
                     href.split('/')
@@ -405,25 +409,48 @@ impl CardDavClient {
 
             let doc = roxmltree::Document::parse(&text)
                 .map_err(|e| Error::Server(format!("Failed to parse XML: {e}")))?;
+            require_multistatus(&doc)?;
 
             let dav_ns = "DAV:";
             let carddav_ns = "urn:ietf:params:xml:ns:carddav";
 
             for response in doc
-                .descendants()
+                .root_element()
+                .children()
                 .filter(|n| n.has_tag_name((dav_ns, "response")))
             {
                 let href = response
-                    .descendants()
+                    .children()
                     .find(|n| n.has_tag_name((dav_ns, "href")))
                     .and_then(|n| n.text())
-                    .unwrap_or_default();
+                    .filter(|href| !href.is_empty())
+                    .ok_or_else(|| {
+                        Error::Server("Incomplete CardDAV discovery: missing resource href".into())
+                    })?;
+                self.resource_url(href)?;
 
-                if let Some(vcard_data) = dav_property(response, carddav_ns, "address-data")
-                    && self
-                        .contact_at(vcard_data, href)
-                        .is_some_and(|c| c.id == contact_id)
+                let vcard_data = required_dav_property(response, carddav_ns, "address-data")?
+                    .text()
+                    .filter(|data| !data.trim().is_empty())
+                    .ok_or_else(|| {
+                        Error::Server("Incomplete CardDAV discovery: empty address-data".into())
+                    })?;
+                let lines = complete_vcard_lines(vcard_data)?;
+                if lines
+                    .iter()
+                    .filter(|line| property_name(line).eq_ignore_ascii_case("UID"))
+                    .count()
+                    > 1
+                    || lines.iter().any(|line| !line.contains(':'))
                 {
+                    return Err(Error::Server(
+                        "Incomplete CardDAV discovery: malformed contact identity".into(),
+                    ));
+                }
+                let contact = self.contact_at(vcard_data, href).ok_or_else(|| {
+                    Error::Server("Incomplete CardDAV discovery: malformed contact".into())
+                })?;
+                if contact.id == contact_id {
                     if found.is_some() {
                         return Err(Error::Server(
                             "Contact ID matches multiple resources; refusing an ambiguous mutation"
@@ -608,6 +635,64 @@ impl CardDavClient {
 
         Ok(())
     }
+}
+
+fn require_multistatus(doc: &roxmltree::Document<'_>) -> Result<()> {
+    if !doc.root_element().has_tag_name(("DAV:", "multistatus")) {
+        return Err(Error::Server(
+            "Expected a CardDAV multistatus response".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn required_dav_property<'a, 'input>(
+    response: roxmltree::Node<'a, 'input>,
+    namespace: &str,
+    name: &str,
+) -> Result<roxmltree::Node<'a, 'input>> {
+    let incomplete = || {
+        Error::Server(format!(
+            "Incomplete CardDAV discovery: missing, failed or conflicting {name}"
+        ))
+    };
+    if response
+        .children()
+        .filter(|node| node.has_tag_name(("DAV:", "status")))
+        .any(|node| {
+            node.text()
+                .and_then(|status| status.split_ascii_whitespace().nth(1))
+                != Some("200")
+        })
+    {
+        return Err(incomplete());
+    }
+    let mut found = None;
+    for propstat in response
+        .children()
+        .filter(|node| node.has_tag_name(("DAV:", "propstat")))
+    {
+        let successful = propstat
+            .children()
+            .find(|node| node.has_tag_name(("DAV:", "status")))
+            .and_then(|node| node.text())
+            .and_then(|status| status.split_ascii_whitespace().nth(1))
+            == Some("200");
+        if !successful {
+            continue;
+        }
+        for property in propstat
+            .children()
+            .filter(|node| node.has_tag_name(("DAV:", "prop")))
+            .flat_map(|node| node.children())
+            .filter(|node| node.has_tag_name((namespace, name)))
+        {
+            if found.replace(property).is_some() {
+                return Err(incomplete());
+            }
+        }
+    }
+    found.ok_or_else(incomplete)
 }
 
 fn dav_property<'a, 'input>(
@@ -843,6 +928,26 @@ fn update_vcard(existing: &str, fields: &ContactFields<'_>) -> Result<String> {
         fields.title,
         fields.notes,
     );
+    let lines = complete_vcard_lines(existing)?;
+    let mut result = String::new();
+    for line in lines {
+        if line.trim_end().eq_ignore_ascii_case("END:VCARD") {
+            for replacement in replacements
+                .lines()
+                .filter(|line| changed(property_name(line)))
+            {
+                result.push_str(replacement);
+                result.push_str("\r\n");
+            }
+        }
+        if !changed(property_name(&line)) {
+            result.push_str(&line);
+        }
+    }
+    Ok(result)
+}
+
+fn complete_vcard_lines(existing: &str) -> Result<Vec<String>> {
     // Keep untouched content lines, including their parameters, groups and folds.
     let mut lines: Vec<String> = Vec::new();
     for line in existing.split_inclusive('\n') {
@@ -873,22 +978,7 @@ fn update_vcard(existing: &str, fields: &ContactFields<'_>) -> Result<String> {
             "Expected one complete vCard for update".into(),
         ));
     }
-    let mut result = String::new();
-    for line in lines {
-        if line.trim_end().eq_ignore_ascii_case("END:VCARD") {
-            for replacement in replacements
-                .lines()
-                .filter(|line| changed(property_name(line)))
-            {
-                result.push_str(replacement);
-                result.push_str("\r\n");
-            }
-        }
-        if !changed(property_name(&line)) {
-            result.push_str(&line);
-        }
-    }
-    Ok(result)
+    Ok(lines)
 }
 
 /// Generate a UID for new contacts.
