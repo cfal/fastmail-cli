@@ -120,6 +120,102 @@ pub async fn extract_text(bytes: &[u8], filename: &str) -> anyhow::Result<Option
     }
 }
 
+pub(crate) fn json_string_size(value: &str) -> anyhow::Result<usize> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("Serialized attachment size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
+fn join_extracted_text<'a>(
+    parts: impl IntoIterator<Item = &'a str>,
+    max_json_bytes: usize,
+) -> anyhow::Result<Option<String>> {
+    let mut output = String::new();
+    let mut serialized = 2usize;
+    for part in parts.into_iter().map(str::trim).filter(|s| !s.is_empty()) {
+        let separator = if output.is_empty() { 0 } else { 4 };
+        let additional = json_string_size(part)? - 2 + separator;
+        anyhow::ensure!(
+            additional <= max_json_bytes.saturating_sub(serialized),
+            "Extracted text exceeds the attachment payload budget; select fewer payload fields or a smaller page"
+        );
+        serialized += additional;
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(part);
+    }
+    Ok((!output.is_empty()).then_some(output))
+}
+
+pub(crate) async fn extract_text_bounded(
+    bytes: &[u8],
+    filename: &str,
+    max_json_bytes: usize,
+) -> anyhow::Result<Option<String>> {
+    use xberg::{
+        ExtractInput, ExtractionConfig, OutputFormat, SecurityLimits, XbergError, extract,
+    };
+
+    if is_image_extension(filename) {
+        return Ok(None);
+    }
+    let config = ExtractionConfig {
+        use_cache: false,
+        disable_ocr: true,
+        // The owning blocking job retains its permit until extraction completes.
+        // xberg's timeout can return while internal blocking work is still running.
+        extraction_timeout_secs: None,
+        output_format: OutputFormat::Plain,
+        include_document_structure: false,
+        max_archive_depth: 0,
+        max_embedded_file_bytes: Some(MAX_ATTACHMENT_BYTES as u64),
+        security_limits: Some(SecurityLimits {
+            max_archive_size: MAX_ATTACHMENT_BYTES,
+            max_compression_ratio: 100,
+            max_files_in_archive: 1024,
+            max_nesting_depth: 128,
+            max_entity_length: 1024 * 1024,
+            max_content_size: max_json_bytes.min(MAX_ATTACHMENT_BYTES),
+            max_iterations: 1_000_000,
+            max_xml_depth: 128,
+            max_table_cells: 100_000,
+            max_pages: Some(1000),
+        }),
+        ..Default::default()
+    };
+    let input = ExtractInput::from_bytes(bytes.to_vec(), &mime_from_filename(filename), None);
+    match extract(input, &config).await {
+        Ok(result) => join_extracted_text(
+            result.results.iter().map(|result| result.content.as_str()),
+            max_json_bytes,
+        ),
+        Err(
+            error @ (XbergError::Security { .. }
+            | XbergError::Timeout { .. }
+            | XbergError::Cancelled { .. }
+            | XbergError::Validation { .. }),
+        ) => Err(error.into()),
+        Err(error) => {
+            tracing::debug!(%filename, %error, "xberg extraction failed");
+            Ok(None)
+        }
+    }
+}
+
 /// Check if filename has an image extension (used to skip xberg for images)
 fn is_image_extension(filename: &str) -> bool {
     matches!(
@@ -275,8 +371,16 @@ pub(crate) fn check_response_status(response: &reqwest::Response) -> crate::erro
 }
 
 pub(crate) async fn read_bounded_response(
+    response: reqwest::Response,
+    limit: usize,
+) -> crate::error::Result<Vec<u8>> {
+    read_charged_response(response, limit, |_| Ok(())).await
+}
+
+pub(crate) async fn read_charged_response(
     mut response: reqwest::Response,
     limit: usize,
+    mut charge: impl FnMut(usize) -> crate::error::Result<()>,
 ) -> crate::error::Result<Vec<u8>> {
     let too_large = || crate::error::Error::Server(format!("Response exceeds {limit} byte limit"));
     if response
@@ -287,6 +391,7 @@ pub(crate) async fn read_bounded_response(
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
+        charge(chunk.len())?;
         if chunk.len() > limit.saturating_sub(bytes.len()) {
             return Err(too_large());
         }
@@ -773,9 +878,59 @@ mod tests {
                     "{path}: {limit}"
                 );
             }
+            let response = reqwest::get(format!("http://127.0.0.1:{port}/{path}"))
+                .await
+                .unwrap();
+            let mut charged = 0;
+            let result = read_charged_response(response, 10, |size| {
+                charged += size;
+                if charged > 9 {
+                    Err(crate::error::Error::Server("aggregate limit".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
+            assert!(result.unwrap_err().to_string().contains("aggregate limit"));
+            assert_eq!(charged, 10);
         }
         task.abort();
         let _ = task.await;
+    }
+
+    #[test]
+    fn extracted_text_budget_counts_json_escaping_and_join_separators() {
+        for text in ["simple", "quote\"slash\\", "a\nb\t\u{0000}", "caf\u{00e9}"] {
+            assert_eq!(
+                json_string_size(text).unwrap(),
+                serde_json::to_vec(text).unwrap().len()
+            );
+        }
+        assert_eq!(
+            join_extracted_text([" a ", "b"], 8).unwrap(),
+            Some("a\n\nb".into())
+        );
+        assert!(join_extracted_text([" a ", "b"], 7).is_err());
+        assert_eq!(join_extracted_text([" ", ""], 0).unwrap(), None);
+        assert!(join_extracted_text(["\""], 3).is_err());
+        assert_eq!(join_extracted_text(["\""], 4).unwrap(), Some("\"".into()));
+    }
+
+    #[tokio::test]
+    async fn bounded_extraction_preserves_text_and_surfaces_limits() {
+        assert_eq!(
+            extract_text_bounded(b"hello", "note.txt", 16)
+                .await
+                .unwrap(),
+            Some("hello".into())
+        );
+        assert!(extract_text_bounded(b"hello", "note.txt", 3).await.is_err());
+        assert_eq!(
+            extract_text_bounded(b"not an image", "photo.png", 3)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

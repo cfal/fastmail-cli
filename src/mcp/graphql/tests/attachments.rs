@@ -1,4 +1,154 @@
+use super::super::attachment_scope::{AttachmentScopes, base64_size};
 use super::*;
+
+#[tokio::test]
+async fn attachment_aliases_share_input_but_each_consume_output_budget() {
+    let server = mock_server(1).await;
+    let size = base64_size(ATTACHMENT_BYTES.len());
+    for (fields, output, accepted) in [
+        ("a:base64 b:base64", 2 * size, true),
+        ("a:base64 b:base64 c:base64", 2 * size, false),
+        ("text", 3, false),
+    ] {
+        let query = format!("{{ attachments(emailId:\"e0\") {{ nodes {{ {fields} }} }} }}");
+        let response = build_schema()
+            .execute(
+                request(&query, client_for(&server), CardDavCreds::default()).data(
+                    AttachmentScopes::with_limits(ATTACHMENT_BYTES.len(), output, 1),
+                ),
+            )
+            .await;
+        assert_eq!(
+            response.errors.is_empty(),
+            accepted,
+            "{fields}: {:?}",
+            response.errors
+        );
+        if !accepted {
+            assert!(
+                response
+                    .errors
+                    .iter()
+                    .any(|e| e.message.contains("budget") || e.message.contains("too large")),
+                "{:?}",
+                response.errors
+            );
+        }
+    }
+    assert_eq!(downloads(&server).await.len(), 3);
+}
+
+#[tokio::test]
+async fn attachment_scope_caches_download_failures_and_limits_unique_blobs() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let scopes = AttachmentScopes::with_limits(ATTACHMENT_BYTES.len() - 1, 100, 1);
+    let scope = scopes.current();
+    let first = scope.bytes(&client, "blob-att-e0").await.unwrap_err();
+    let again = scope.bytes(&client, "blob-att-e0").await.unwrap_err();
+    assert!(Arc::ptr_eq(&first, &again));
+    assert!(first.to_string().contains("download budget"));
+    assert!(
+        scope
+            .bytes(&client, "another")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unique blob")
+    );
+    assert_eq!(downloads(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_blob_downloads_cannot_cross_the_aggregate_limit() {
+    let server = mock_server(2).await;
+    let client = client_for(&server);
+    let scopes = AttachmentScopes::with_limits(ATTACHMENT_BYTES.len(), 100, 2);
+    let scope = scopes.current();
+    let (a, b) = tokio::join!(
+        scope.bytes(&client, "blob-att-e0"),
+        scope.bytes(&client, "blob-att-e1")
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert_eq!(downloads(&server).await.len(), 2);
+}
+
+#[tokio::test]
+async fn attachment_download_slots_bound_overlapping_calls_without_holding_client_lock() {
+    use async_graphql::futures_util::{future::join_all, stream};
+    use axum::{Router, body::Body, routing::get};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+    let router = Router::new().route(
+        "/jmap/download/{id}",
+        get({
+            let peak = peak.clone();
+            let release = release.clone();
+            move || {
+                let (active, peak, release, started) = (
+                    active.clone(),
+                    peak.clone(),
+                    release.clone(),
+                    started.clone(),
+                );
+                async move {
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(count, Ordering::SeqCst);
+                    started.send(()).unwrap();
+                    release.acquire().await.unwrap().forget();
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Body::from_stream(stream::iter([Ok::<_, std::io::Error>("ab"), Ok("cd")]))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let uri = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = Arc::new(tokio::sync::Mutex::new(JmapClient::with_test_session(
+        &format!("{uri}/jmap"),
+    )));
+    let scopes = AttachmentScopes::with_limits(24, 100, 6);
+    let scope = scopes.current();
+    let jobs = tokio::spawn({
+        let client = client.clone();
+        async move {
+            join_all((0..6).map(|id| {
+                let (scope, client) = (scope.clone(), client.clone());
+                async move { scope.bytes(&client, &format!("blob-{id}")).await }
+            }))
+            .await
+        }
+    });
+    for _ in 0..4 {
+        tokio::time::timeout(std::time::Duration::from_secs(5), starts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(starts.try_recv().is_err());
+    drop(
+        client
+            .try_lock()
+            .expect("downloads must release the account client lock"),
+    );
+    release.add_permits(6);
+    let results = tokio::time::timeout(std::time::Duration::from_secs(5), jobs)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(results.iter().all(|result| {
+        result
+            .as_ref()
+            .is_ok_and(|bytes| bytes.as_slice() == b"abcd")
+    }));
+    assert_eq!(peak.load(Ordering::SeqCst), 4);
+    server.abort();
+    let _ = server.await;
+}
 
 #[tokio::test]
 async fn repeated_blobs_have_unique_occurrence_cursors_and_legacy_ambiguity_is_explicit() {

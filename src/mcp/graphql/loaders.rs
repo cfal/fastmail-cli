@@ -188,8 +188,8 @@ impl Loader<String> for BlobLoader {
 /// the session's object limit, including a single large `load_many` request.
 const EMAIL_BATCH: usize = 100;
 
-/// Cap on concurrent blob downloads. Attachments are large and are held in
-/// memory while being processed, so this is deliberately small.
+/// Dispatch threshold for the public fallback loader. Official requests use
+/// the attachment scope's semaphore to bound overlapping downloads.
 const BLOB_BATCH: usize = 4;
 
 // Loader handles as resolvers see them. `DataLoader::new` builds a `NoCache`

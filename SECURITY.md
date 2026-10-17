@@ -76,8 +76,31 @@ and fragment definitions, with at most 32 levels of expanded nesting. Use variab
 for large message bodies. These are not a sandbox or global memory quota.
 Untrusted document parsing can still consume substantial CPU/memory. Prefer a
 dedicated unprivileged account/container with OS resource limits for a shared
-service. Extraction disables disk caching and OCR and requests a 60-second
-cooperative timeout; this cannot forcibly terminate every parser.
+service. Extraction disables disk caching and OCR. The CLI's best-effort
+extractor requests a 60-second cooperative timeout; this cannot forcibly
+terminate every parser.
+
+GraphQL attachment payloads share a per-operation scope: at most 128 MiB of
+streamed blob input, 256 MiB of serialized attachment strings (including JSON
+escaping), 1,024 unique blob IDs, and four concurrent downloads. The existing
+64 MiB per-blob limit still applies. Aliases share a download and cached failures,
+but each returned payload counts against the output budget. Partial failed or
+cancelled downloads remain charged. Each subscription emission gets a fresh
+scope; work already started retains its original scope.
+
+Base64 encoding, image conversion, and document extraction share two process-wide
+blocking-worker slots. Cancellation does not release a slot while its job is
+still running. GraphQL extraction disables xberg's early-return timeout so that
+the slot remains held until extraction finishes. It requests plain text, disables
+recursive embedded-document extraction, caps archive input at 64 MiB and 1,024
+entries, pages at 1,000, cells at 100,000, and applies explicit parser limits.
+Returned extracted text is capped at 64 MiB of JSON-serialized text, or the
+remaining payload allowance when smaller; resource/validation errors are visible.
+These limits preserve the supported formats, but some xberg backends materialize
+documents before checking their limits. They do not provide a hard bound on
+parser allocations, CPU time, total process memory, or the complete HTTP response.
+Raw bytes, transformed data and transport serialization may coexist. Custom
+library schemas must use `graphql::request` to install this request accounting.
 
 GraphQL/MCP compose inputs allow at most 128 attachments and 25 MiB of combined
 decoded bytes, including existing blobs. Names and MIME types are bounded to

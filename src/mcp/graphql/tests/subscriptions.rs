@@ -86,10 +86,12 @@ async fn subscription_does_not_retain_lazy_records_between_events() {
         .await;
     let schema = build_schema();
     let req = request(
-        "subscription { emails(pollSeconds: 1) { id textBody readableBody { format content } } }",
+        "subscription { emails(pollSeconds: 1) { id textBody readableBody { format content } attachments { nodes { base64 } } } }",
         client_for(&server),
         CardDavCreds::default(),
-    );
+    ).data(super::super::attachment_scope::AttachmentScopes::with_limits(
+        ATTACHMENT_BYTES.len(), super::super::attachment_scope::base64_size(ATTACHMENT_BYTES.len()), 1,
+    ));
     let mut stream = schema.execute_stream(req);
     for _ in 0..3 {
         let response = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
@@ -110,4 +112,9 @@ async fn subscription_does_not_retain_lazy_records_between_events() {
         .filter(|c| c.method == "Email/get" && c.properties.contains(&"textBody".into()))
         .count();
     assert_eq!(detail_gets, 3, "each event must release its lazy records");
+    assert_eq!(
+        downloads(&server).await.len(),
+        3,
+        "each event receives a fresh blob scope"
+    );
 }

@@ -1575,6 +1575,16 @@ impl JmapClient {
         crate::util::read_bounded_response(resp, crate::util::MAX_ATTACHMENT_BYTES).await
     }
 
+    pub(crate) async fn download_blob_charged(
+        &self,
+        blob_id: &str,
+        charge: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        let response = self.fetch_blob(blob_id).await?;
+        crate::util::read_charged_response(response, crate::util::MAX_ATTACHMENT_BYTES, charge)
+            .await
+    }
+
     /// Count streamed bytes without retaining the blob; over-limit results are `limit + 1`.
     pub(crate) async fn blob_size(&self, blob_id: &str, limit: usize) -> Result<usize> {
         let mut resp = self.fetch_blob(blob_id).await?;

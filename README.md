@@ -1123,7 +1123,7 @@ fetches no emails at all:
 ### Lazy fields and batching
 
 Nothing below a list is fetched eagerly, and every lazy field goes through a
-[DataLoader](https://github.com/graphql/dataloader): the resolvers for a list's
+[DataLoader](https://github.com/graphql/dataloader) or a request-scoped blob cache: the resolvers for a list's
 elements run concurrently, and their fetches collapse into **one batched API
 call** rather than one per element.
 
@@ -1140,6 +1140,15 @@ call** rather than one per element.
 The naive shape — one detail call per email — would be 26. Loader caches are
 per request, so referencing the same email or mailbox twice in one query costs
 one fetch; nothing is retained between requests where it could go stale.
+
+Attachment payloads permit 128 MiB of streamed input and 256 MiB of serialized
+strings per operation, with a 64 MiB per-blob limit, 1,024 distinct blob IDs and
+four concurrent downloads. Repeated aliases share bytes but each returned string
+counts toward the output limit. Each subscription event receives a fresh budget.
+Encoding, resizing and extraction share two blocking-worker slots. Extraction
+retains the supported formats with conservative parser limits and a 64 MiB
+serialized-text ceiling; this is not a hard limit on backend memory allocations.
+See [Resource Limits](SECURITY.md#resource-limits).
 
 Because the graph contains cycles (`Email.thread.emails`, `Email.mailboxes.emails`),
 nesting is capped at depth 15. The complexity budget is 100,000. Resolvers

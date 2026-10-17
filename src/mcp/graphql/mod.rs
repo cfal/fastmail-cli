@@ -6,6 +6,7 @@
 use async_graphql::Schema;
 
 mod attachment_cursor;
+mod attachment_scope;
 mod attachments;
 mod drafts;
 
@@ -124,6 +125,7 @@ pub fn build_schema() -> FastmailSchema {
 pub fn request(query: &str, client: SharedClient, carddav: CardDavCreds) -> async_graphql::Request {
     let loaders = loaders::Loaders::new(client.clone());
     async_graphql::Request::new(query)
+        .data(attachment_scope::AttachmentScopes::default())
         .data(loaders::shared_emails(client.clone()))
         .data(client)
         .data(carddav)

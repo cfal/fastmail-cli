@@ -60,6 +60,9 @@ impl SubscriptionRoot {
         poll_seconds: Option<u64>,
     ) -> Result<impl Stream<Item = Result<GqlEmail>> + use<>> {
         let client = ctx.data::<SharedClient>()?.clone();
+        let scopes = ctx
+            .data_opt::<super::attachment_scope::AttachmentScopes>()
+            .cloned();
         ctx.data::<super::loaders::Emails>()?
             .enable_all_cache(false);
         if let Some(shared) = ctx.data_opt::<super::loaders::SharedEmails>() {
@@ -108,20 +111,28 @@ impl SubscriptionRoot {
             }
         });
 
-        Ok(batches.flat_map(move |batch| match batch {
-            Ok(emails) => stream::iter(
-                emails
-                    .into_iter()
-                    .map(|email| {
-                        Ok(if full {
-                            GqlEmail::full(email)
-                        } else {
-                            GqlEmail::summary(email)
+        Ok(batches
+            .flat_map(move |batch| match batch {
+                Ok(emails) => stream::iter(
+                    emails
+                        .into_iter()
+                        .map(|email| {
+                            Ok(if full {
+                                GqlEmail::full(email)
+                            } else {
+                                GqlEmail::summary(email)
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            Err(e) => stream::iter(vec![Err(e)]),
-        }))
+                        .collect::<Vec<_>>(),
+                ),
+                Err(e) => stream::iter(vec![Err(e)]),
+            })
+            .map(move |item| {
+                // async-graphql resolves each emitted item before polling the next.
+                if let Some(scopes) = &scopes {
+                    scopes.renew();
+                }
+                item
+            }))
     }
 }

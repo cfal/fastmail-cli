@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use super::attachment_cursor::attachment_connection;
+use super::attachment_scope::{AttachmentScope, AttachmentScopes, base64_size, process};
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
 
 use super::connection::{
@@ -609,7 +610,17 @@ impl GqlAttachment {
     /// The blob's bytes, through the loader so sibling fields on this
     /// attachment — and every other attachment resolving at the same time —
     /// share one batch of downloads rather than one each.
-    async fn bytes(&self, ctx: &Context<'_>) -> Result<std::sync::Arc<Vec<u8>>> {
+    async fn bytes(
+        &self,
+        ctx: &Context<'_>,
+        scope: Option<&AttachmentScope>,
+    ) -> Result<Arc<Vec<u8>>> {
+        if let Some(scope) = scope {
+            return scope
+                .bytes(ctx.data::<super::SharedClient>()?, &self.blob_id)
+                .await
+                .map_err(to_gql_error);
+        }
         ctx.data::<Blobs>()?
             .load_one(self.blob_id.clone())
             .await
@@ -653,11 +664,24 @@ impl GqlAttachment {
     /// so it works for any attachment whatever its type.
     #[graphql(complexity = "child_complexity.saturating_add(10).min(super::MAX_COMPLEXITY + 1)")]
     async fn base64(&self, ctx: &Context<'_>) -> Result<String> {
-        let data = self.bytes(ctx).await?;
-        Ok(base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            data.as_slice(),
-        ))
+        let scope = ctx
+            .data_opt::<AttachmentScopes>()
+            .map(AttachmentScopes::current);
+        let data = self.bytes(ctx, scope.as_deref()).await?;
+        process(move || {
+            let size = base64_size(data.len());
+            let reservation = scope
+                .as_ref()
+                .map(|scope| scope.reserve(size, size))
+                .transpose()?;
+            let encoded =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data.as_slice());
+            if let Some(reservation) = reservation {
+                reservation.commit(size)?;
+            }
+            Ok(encoded)
+        })
+        .await
     }
 
     /// The image resized to fit `maxBytes`, then base64-encoded. Null when this
@@ -679,16 +703,33 @@ impl GqlAttachment {
         if !crate::util::is_image(declared, name) {
             return Ok(None);
         }
-        let mime = crate::util::infer_image_mime(name).unwrap_or(declared);
-
-        let data = self.bytes(ctx).await?;
+        let mime = crate::util::infer_image_mime(name)
+            .unwrap_or(declared)
+            .to_owned();
+        let scope = ctx
+            .data_opt::<AttachmentScopes>()
+            .map(AttachmentScopes::current);
+        let data = self.bytes(ctx, scope.as_deref()).await?;
         let limit = max_bytes.map_or(crate::util::MCP_IMAGE_MAX_BYTES, |b| b as usize);
-        let (resized, _mime) = crate::util::resize_image(&data, mime, limit)
-            .map_err(|e| async_graphql::Error::new(format!("Failed to process image: {e}")))?;
-        Ok(Some(base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &resized,
-        )))
+        process(move || {
+            let maximum = base64_size(data.len().min(limit));
+            let reservation = scope
+                .as_ref()
+                .map(|scope| scope.reserve(maximum, maximum.min(6)))
+                .transpose()?;
+            let limit = reservation
+                .as_ref()
+                .map_or(limit, |reserved| limit.min((reserved.capacity - 2) / 4 * 3));
+            let (resized, _mime) = crate::util::resize_image(&data, &mime, limit)
+                .map_err(|e| async_graphql::Error::new(format!("Failed to process image: {e}")))?;
+            let encoded =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &resized);
+            if let Some(reservation) = reservation {
+                reservation.commit(base64_size(resized.len()))?;
+            }
+            Ok(Some(encoded))
+        })
+        .await
     }
 
     /// Text extracted from a document (PDF, DOCX, XLSX, …). Null when nothing
@@ -699,11 +740,36 @@ impl GqlAttachment {
     /// the text is actually wanted. Nothing else on `Attachment` triggers it.
     #[graphql(complexity = "child_complexity.saturating_add(50).min(super::MAX_COMPLEXITY + 1)")]
     async fn text(&self, ctx: &Context<'_>) -> Result<Option<String>> {
-        let name = self.name.as_deref().unwrap_or("attachment");
-        let data = self.bytes(ctx).await?;
-        crate::util::extract_text(&data, name)
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("Failed to extract text: {e}")))
+        let name = self.name.clone().unwrap_or_else(|| "attachment".into());
+        let scope = ctx
+            .data_opt::<AttachmentScopes>()
+            .map(AttachmentScopes::current);
+        let data = self.bytes(ctx, scope.as_deref()).await?;
+        let runtime = tokio::runtime::Handle::current();
+        process(move || {
+            let maximum = crate::util::MAX_ATTACHMENT_BYTES;
+            let reservation = scope
+                .as_ref()
+                .map(|scope| scope.reserve(maximum, 2))
+                .transpose()?;
+            let limit = reservation
+                .as_ref()
+                .map_or(maximum, |reserved| reserved.capacity);
+            let text = runtime
+                .block_on(crate::util::extract_text_bounded(&data, &name, limit))
+                .map_err(|e| async_graphql::Error::new(format!("Failed to extract text: {e}")))?;
+            if let Some(reservation) = reservation {
+                let bytes = text
+                    .as_deref()
+                    .map(crate::util::json_string_size)
+                    .transpose()
+                    .map_err(|e| async_graphql::Error::new(e.to_string()))?
+                    .unwrap_or(0);
+                reservation.commit(bytes)?;
+            }
+            Ok(text)
+        })
+        .await
     }
 }
 
