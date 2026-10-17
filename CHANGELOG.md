@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.0.6] - 2026-10-17
+
 ### Added
 
 - GraphQL/MCP outgoing attachments for send, reply, and forward, supplied as

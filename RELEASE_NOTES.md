@@ -1,40 +1,44 @@
-# v4.0.5
+# v4.0.6
 
-## Caller-Managed Email Checkpoints
+## Attachments And Drafts
 
-- `fastmail email-state` reads the account's current opaque Email state without
-  fetching mail. `fastmail changes --since-state STATE` immediately follows all
-  change pages and returns one complete ID-only batch, including `accountId`,
-  original `oldState`, final `newState`, and `created`/`updated`/`destroyed` arrays.
-  Both commands support direct access and `--server`.
-- Keep durable processing under caller control: atomically enqueue IDs and save
-  the candidate checkpoint, then fetch/process pending messages separately.
-  Restart from the old state after an uncommitted result to replay discoverable
-  changes. The CLI never persists or acknowledges a checkpoint on your behalf.
-- Preserve every page's IDs, including duplicates and creations later destroyed,
-  without assuming chronological order or collapsing them into net changes.
-  Successful empty batches can advance the state too.
+- Send, reply, and forward with GraphQL/MCP attachments supplied as inline base64
+  or existing blob IDs. Upload reusable blobs with `uploadAttachment`. Attachment
+  previews are bounded and confirmations bind the ordered payload contents.
+- Send saved drafts with `sendDraft`, preserving MIME content and pinning the
+  submission identity. `deleteDraft` moves a draft to Trash with a fresh state
+  guard rather than permanently deleting it.
+- Infer image MIME types for outgoing CLI attachments instead of sending them as
+  `application/octet-stream`.
 
-## Recovery And Limits
+## Protocol And Mutation Safety
 
-- Return no partial successful batch or checkpoint on pagination, transport,
-  validation, or limit failures. Aggregation is capped at 1,000 pages, 100,000 ID
-  entries, and 16 MiB of ID/state strings, rather than silently truncated.
-- On `cannotCalculateChanges`, exit 1 with structured `resync-required` data,
-  original `staleState`, the server error in `staleStateError`, and `currentState`.
-  If the replacement-state lookup fails, return `currentState: null` and
-  `currentStateError`. Never silently reset or continue.
-- Document SQLite-style atomic consumption and recovery: capture a replacement
-  state before backfill, durably queue the backfill IDs, then resume changes from
-  that captured state. Use the same backfill procedure for oversized windows.
-- Existing `watch`, GraphQL subscriptions, and legacy Rust APIs remain unchanged.
-  Change history is server-dependent, not an audit log: messages created and
-  destroyed between checkpoints may be omitted by JMAP entirely.
+- Validate JMAP method, call ID, account, and complete get results; require
+  positive evidence for writes. Confirmed submission remains successful when
+  automatic Sent filing fails, with a warning not to resend. Uncertain writes
+  are never retried automatically.
+- Resolve system folders by unique role and pin reply identities. Reject
+  ambiguous or incomplete CardDAV mutation discovery while preserving
+  best-effort listing and untouched vCard properties.
+- Use independent private temporary files for concurrent configuration saves.
+  Reject invalid attachment download formats, oversized local HTML input, and
+  scalar/array GraphQL variables; null variables remain equivalent to omission.
 
-## Security
+## GraphQL Performance And Limits
 
-- Update `rustls` to 0.23.45, fixing RUSTSEC-2026-0285: TLS 1.3 handshake
-  messages sent across encryption-level boundaries are now rejected.
+- Preserve cursor intervals in both pagination directions, give each attachment
+  occurrence its own cursor, and retain match-all operands in boolean filters.
+- Share attachment downloads within each request or subscription emission.
+  Enforce cumulative 128 MiB input and 256 MiB serialized-payload budgets, retain
+  the 64 MiB per-blob limit, and bound download and processing concurrency.
+  Extraction backend internals still have documented memory and CPU limitations.
+- Page thread member summaries before loading bodies, fetch bodies only when
+  selected, and release the account lock during independent reads. Existing
+  public Rust APIs and eager thread loading remain compatible.
+- Bound arrival-change paging and report subscription history gaps explicitly.
+  Oversized change windows stop the watcher without advancing its checkpoint.
+  Subscriptions require exactly one expanded root-field occurrence, including
+  aliases, fragments, and repeats.
 
 Four platform archives include licenses; `SHA256SUMS` covers all four archives.
 The release also publishes Linux amd64/arm64 container manifests.
