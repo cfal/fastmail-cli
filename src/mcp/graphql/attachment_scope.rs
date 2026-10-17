@@ -221,6 +221,72 @@ mod tests {
         assert!(first.charge_input(1).is_err());
     }
 
+    #[test]
+    fn full_size_blobs_fit_but_three_base64_aliases_do_not() {
+        let scope = AttachmentScopes::default().current();
+        scope
+            .charge_input(crate::util::MAX_ATTACHMENT_BYTES)
+            .unwrap();
+        let encoded = base64_size(crate::util::MAX_ATTACHMENT_BYTES);
+        for _ in 0..2 {
+            scope
+                .reserve(encoded, encoded)
+                .unwrap()
+                .commit(encoded)
+                .unwrap();
+        }
+        assert!(scope.reserve(encoded, encoded).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_stream_does_not_refund_received_bytes() {
+        use async_graphql::futures_util::{StreamExt, stream};
+        use axum::{Router, body::Body, routing::get};
+        let router = Router::new().route(
+            "/blob",
+            get(|| async {
+                Body::from_stream(
+                    stream::iter([Ok::<_, std::io::Error>("1234")]).chain(stream::pending()),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/blob",
+            listener.local_addr().unwrap().port()
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let response = reqwest::get(url).await.unwrap();
+        assert!(response.content_length().is_none());
+        let scope = Arc::new(AttachmentScope::new(10, 20, 2));
+        let (charged, received) = tokio::sync::oneshot::channel();
+        let job = tokio::spawn({
+            let scope = scope.clone();
+            let mut charged = Some(charged);
+            async move {
+                crate::util::read_charged_response(response, 10, |bytes| {
+                    scope.charge_input(bytes)?;
+                    if let Some(charged) = charged.take() {
+                        charged.send(()).unwrap();
+                    }
+                    Ok(())
+                })
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+        assert_eq!(scope.input.load(Ordering::Relaxed), 4);
+        scope.charge_input(6).unwrap();
+        assert!(scope.charge_input(1).is_err());
+        server.abort();
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn processing_permits_survive_cancelled_waiters() {
         let mut jobs = Vec::new();
