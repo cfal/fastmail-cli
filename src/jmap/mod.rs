@@ -1,4 +1,5 @@
 mod checkpoints;
+mod drafts;
 mod events;
 mod watch;
 

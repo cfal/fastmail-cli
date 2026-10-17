@@ -278,6 +278,7 @@ async fn run_with_carddav(
 
 mod attachments;
 mod connections;
+mod drafts;
 mod mutations;
 mod outgoing_attachments;
 mod readable_body;

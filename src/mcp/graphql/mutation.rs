@@ -8,6 +8,7 @@ use crate::models::{EmailAddress, Identity};
 use crate::util::parse_addresses;
 
 use super::attachments::{self, AttachmentInput, GqlUploadedAttachment};
+use super::drafts::{self, GqlDraftSendResult};
 use super::types::*;
 
 pub struct MutationRoot;
@@ -365,6 +366,87 @@ impl MutationRoot {
             content_type,
             size,
         })
+    }
+
+    /// Send an existing saved draft without reconstructing its content. PREVIEW first,
+    /// then CONFIRM with the same emailId and token. DRAFT is not a valid action here.
+    /// A successful submission with filingWarning must not be retried.
+    async fn send_draft(
+        &self,
+        ctx: &Context<'_>,
+        email_id: String,
+        action: SendAction,
+        confirmation_token: Option<String>,
+    ) -> Result<GqlDraftSendResult> {
+        if matches!(action, SendAction::Draft) {
+            return Ok(GqlComposeResult::failed(
+                "sendDraft supports PREVIEW or CONFIRM, not DRAFT".into(),
+            )
+            .into());
+        }
+        let store = ctx.data::<super::types::NonceStore>()?;
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        let mailboxes = match client.prepare_draft_send().await {
+            Ok(mailboxes) => mailboxes,
+            Err(error) => return Ok(GqlComposeResult::failed(error.to_string()).into()),
+        };
+        let snapshot = match client.draft_snapshot(&email_id, true).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Ok(GqlComposeResult::failed(error.to_string()).into()),
+        };
+        if let Err(error) = mailboxes.check_not_trashed(&snapshot.email) {
+            return Ok(GqlComposeResult::failed(error.to_string()).into());
+        }
+        let from = match drafts::sender(&snapshot.email) {
+            Ok(from) => from,
+            Err(error) => return Ok(GqlComposeResult::failed(error).into()),
+        };
+        let identity = match client.resolve_sender(Some(from)).await {
+            Ok(identity) => identity,
+            Err(error) => return Ok(GqlComposeResult::failed(error.to_string()).into()),
+        };
+        let preview = match drafts::preview(&snapshot.email, &identity) {
+            Ok(preview) => preview,
+            Err(error) => return Ok(GqlComposeResult::failed(error).into()),
+        };
+        let binding = compose_binding(
+            &client,
+            "sendDraft",
+            serde_json::json!({
+                "emailId":email_id, "sender":identity, "mailboxes":mailboxes,
+            }),
+        )?;
+        let params = [binding.as_str()];
+        if matches!(action, SendAction::Preview) {
+            let nonce = super::types::issue_nonce(store, &params).await;
+            return Ok(GqlComposeResult::previewed(preview, nonce).into());
+        }
+        if let Err(error) =
+            super::types::consume_draft_nonce(store, confirmation_token.as_deref(), &params).await
+        {
+            return Ok(GqlComposeResult::failed(error.into()).into());
+        }
+        match client.send_draft_with_identity(&snapshot.email, &identity, &mailboxes).await {
+            Ok(submission) => {
+                let mut result = GqlDraftSendResult::from(GqlComposeResult::completed(email_id));
+                result.submission_id = Some(submission.id);
+                result.filing_warning = submission.filing_warning;
+                Ok(result)
+            }
+            Err(error) => Ok(GqlComposeResult::failed(format!(
+                "Draft submission failed or its outcome is unknown; inspect Sent before retrying: {error}"
+            )).into()),
+        }
+    }
+
+    /// Discard a saved draft by moving it to Trash, never permanently deleting it.
+    /// An Email state conflict leaves the draft untouched; inspect before retrying.
+    async fn delete_draft(&self, ctx: &Context<'_>, email_id: String) -> Result<GqlStatus> {
+        let mut client = ctx.data::<super::SharedClient>()?.lock().await;
+        match client.discard_draft(&email_id).await {
+            Ok(()) => Ok(GqlStatus::completed("Draft moved to Trash".into())),
+            Err(error) => Ok(GqlStatus::failed(error.to_string())),
+        }
     }
 
     /// Move an email to a different mailbox/folder.

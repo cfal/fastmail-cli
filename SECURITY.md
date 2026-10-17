@@ -37,6 +37,29 @@ command-line argument or expose it in logs, shell history, or query strings.
 Environment variables still require protection from other processes with access
 to them.
 
+## Saved Draft Operations
+
+GraphQL/MCP `sendDraft` requires a one-shot account/operation/Email-ID/identity
+approval and submits that immutable Email directly, without MIME reconstruction.
+It refuses incomplete text previews, missing header metadata, repeated routing
+headers (including Reply-To and Subject), and drafts in Trash, and rechecks these
+at confirmation. Mailboxes are
+resolved strictly by role, not display name; those IDs are also approval-bound.
+Starting a submission invalidates all outstanding approvals for the same payload,
+including on ambiguous failure. New explicit previews can still authorize a
+repeat send; this is not a durable submission deduplication service.
+JMAP has no atomic Email-state precondition on EmailSubmission creation: a
+different client can change draft classification or submit it after that check.
+Post-submit filing patches only Drafts/Sent membership and `$draft`/`$seen`;
+it is not conditional on Email state. Filing errors retain positive submission
+evidence and return a warning, not a reason to send again. Transport errors can
+have ambiguous outcomes and are never retried automatically.
+
+`deleteDraft` means a recoverable move to Trash, with no confirmation token,
+like `moveEmail`. It requires a fresh draft snapshot and a matching account-wide
+Email state at the write; even unrelated arrivals can reject the operation.
+Neither operation permanently deletes or replaces message content.
+
 ## Resource Limits
 
 HTTP JSON requests are limited to 2 MiB; attachment uploads and buffered upstream
@@ -69,6 +92,13 @@ Ordered names/types and SHA-256 byte digests or immutable blob IDs are bound to
 the existing account/operation-specific one-shot approval. No compose uploads or
 mail creation happen before confirmation. The explicit `uploadAttachment`
 mutation is a separate write and does not require a compose approval.
+
+Saved-draft previews allow at most 128 listed body/attachment parts and 1 MiB of
+formatted preview text, and request at most 1 MiB per text body value. Missing,
+truncated, or encoding-problem text values prevent approval. Attachments and
+non-text inline parts are represented by metadata, not downloaded or inspected.
+The preview output cap is checked after formatting; upstream response bounds
+remain the separate limit on fetched data and intermediate allocations.
 
 Readable message bodies use local HTML-to-Markdown/text conversion, not document
 ingestion or a browser. They never fetch linked resources, CID images, data-URL

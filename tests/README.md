@@ -22,6 +22,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 - `src/remote.rs`: server URL validation, Basic credential decoding/redaction, and proxy error classification.
 - `src/mcp/graphql/tests/`: schema, connections, resolution and batching, attachments, mutations, sessions, and subscriptions. Shared JMAP fixtures remain in `src/mcp/graphql/tests.rs`.
 - `src/mcp/graphql/tests/outgoing_attachments.rs`: attachment previews, confirmation bindings, upload/reuse order, malformed inputs, and absence of writes before approval. Small byte budgets exercise decoding and aggregate limits beside the attachment helpers; JMAP tests cover bounded blob counting and remote Basic auth.
+- `src/mcp/graphql/tests/drafts.rs`: saved-draft preview fidelity and bounds, account/identity/operation approvals, one-shot sending, filing warnings, and conditional Trash moves. JMAP tests validate snapshot and positive write-response evidence. No live sending or draft replacement is exercised.
 - Small pure helpers retain tests beside their implementations, including GraphQL input limits, filters, SDL slicing, image bounds, and model serialization.
 - `src/models/readable_body_tests.rs`: MIME-aware body selection, HTML conversion, image policy, source fidelity, failures, and limits, using synthetic email fixtures in `tests/fixtures/`.
 - `tests/config.rs`: real configuration getters and persistence in child processes with isolated homes and environment variables.

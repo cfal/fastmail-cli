@@ -1100,11 +1100,28 @@ pub async fn consume_nonce(
     nonce: Option<&str>,
     parts: &[&str],
 ) -> std::result::Result<(), &'static str> {
+    consume_nonce_inner(store, nonce, parts, false).await
+}
+
+/// A send attempt invalidates other outstanding approvals for this same draft payload.
+pub(super) async fn consume_draft_nonce(
+    store: &NonceStore,
+    nonce: Option<&str>,
+    parts: &[&str],
+) -> std::result::Result<(), &'static str> {
+    consume_nonce_inner(store, nonce, parts, true).await
+}
+
+async fn consume_nonce_inner(
+    store: &NonceStore,
+    nonce: Option<&str>,
+    parts: &[&str],
+    invalidate_matching: bool,
+) -> std::result::Result<(), &'static str> {
     let nonce =
         nonce.ok_or("Missing confirmation_token. Use action=PREVIEW first to obtain one.")?;
-    let entry = store
-        .lock()
-        .await
+    let mut map = store.lock().await;
+    let entry = map
         .remove(nonce)
         .ok_or("Invalid or already-used confirmation_token. Re-run PREVIEW.")?;
     if std::time::Instant::now().duration_since(entry.issued_at) >= NONCE_TTL {
@@ -1112,6 +1129,9 @@ pub async fn consume_nonce(
     }
     if entry.fingerprint != params_fingerprint(parts) {
         return Err("Params changed between PREVIEW and CONFIRM. Re-run PREVIEW.");
+    }
+    if invalidate_matching {
+        map.retain(|_, other| other.fingerprint != entry.fingerprint);
     }
     Ok(())
 }

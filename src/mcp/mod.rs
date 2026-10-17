@@ -209,6 +209,19 @@ avoid the separate 64 KiB query-document limit. Larger files must already exist
 as blobs (including uploads through /cli/v1/upload). Blob previews download to
 measure size; confirmed blobs are reused, not uploaded again.
 
+Saved drafts are submitted by immutable Email ID, without rebuilding MIME:
+  sendDraft(emailId: String!, action: SendAction!, confirmationToken: String): DraftSendResult!
+  DraftSendResult { success emailId submissionId preview confirmationToken filingWarning error }
+  deleteDraft(emailId: String!): Status!
+sendDraft requires PREVIEW then CONFIRM; DRAFT is invalid. Show both body
+alternatives and attachment metadata. Incomplete text, repeated routing headers,
+or Trash membership prevents approval. Each attempt invalidates sibling approvals.
+submissionId means accepted, not delivered. filingWarning means the submission
+succeeded but Sent filing needs inspection: do not resend. deleteDraft immediately
+moves a checked draft to Trash with an Email-state guard, never destroys it.
+Sending cannot atomically guard draft membership against other mail clients.
+After ambiguous write errors, inspect before retrying. updateDraft is not supported.
+
 EXAMPLES
 ```
 { emails(filter: {unread: true, inMailbox: \"INBOX\", not: {hasKeyword: \"$answered\"}, or: [{from: \"a@b.com\"}, {to: \"a@b.com\"}]}, first: 10) { totalCount nodes { id subject from { email } } } }

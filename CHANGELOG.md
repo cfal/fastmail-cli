@@ -8,6 +8,11 @@
   inline base64 or existing blob IDs, plus an `uploadAttachment` mutation.
   Adapted from upstream #76/#78 with bounded preview downloads, ordered
   SHA-256 confirmation bindings, and unchanged public Rust APIs and HTTP limits.
+- GraphQL/MCP `sendDraft` with account-bound preview/confirmation, pinned
+  submission identities, intact MIME content, and separate filing warnings.
+  `deleteDraft` moves drafts to Trash using a fresh Email-state guard, without
+  permanent deletion. Selectively adapted from upstream #73; destructive draft
+  replacement is not included.
 
 ### Fixed
 

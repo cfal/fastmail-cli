@@ -6,6 +6,7 @@
 use async_graphql::Schema;
 
 mod attachments;
+mod drafts;
 
 pub mod connection;
 pub mod filter;

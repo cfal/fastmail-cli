@@ -1,6 +1,204 @@
 use super::*;
 
 #[tokio::test]
+async fn draft_snapshots_require_matching_account_id_state_and_classification() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let valid = json!({"accountId":"acct1","state":"state", "list":[{"id":"draft", "keywords":{"$draft":true}}],"notFound":[]});
+    let mut cases = vec![(valid.clone(), true)];
+    for key in ["state", "accountId", "notFound"] {
+        let mut data = valid.clone();
+        data.as_object_mut().unwrap().remove(key);
+        cases.push((data, false));
+    }
+    for (key, value) in [
+        ("accountId", json!("other")),
+        ("list", json!([])),
+        ("list", json!([{"id":"wrong", "keywords":{"$draft":true}}])),
+        ("list", json!([{"id":"draft", "keywords":{"$draft":false}}])),
+        ("list", json!([{"id":"draft", "keywords":{}}])),
+        ("notFound", json!(["draft"])),
+    ] {
+        let mut data = valid.clone();
+        data[key] = value;
+        cases.push((data, false));
+    }
+    for (payload, success) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"methodResponses":[["Email/get",payload,"draft"]]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = JmapClient::with_test_session(&server.uri());
+        let result = client.draft_snapshot("draft", true).await;
+        assert_eq!(result.is_ok(), success, "{payload}");
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["methodCalls"][0][1]["ids"], json!(["draft"]));
+        assert_eq!(
+            body["methodCalls"][0][1]["properties"],
+            json!(EMAIL_FULL_PROPERTIES)
+        );
+        assert_eq!(body["methodCalls"][0][1]["maxBodyValueBytes"], 1024 * 1024);
+        assert_eq!(body["methodCalls"][0][1]["fetchTextBodyValues"], true);
+        assert_eq!(body["methodCalls"][0][1]["fetchHTMLBodyValues"], true);
+    }
+}
+
+#[tokio::test]
+async fn draft_submission_requires_positive_evidence_and_preserves_filing_failures() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::body_string_contains};
+    let primary = json!(["EmailSubmission/set",{"accountId":"acct1","created":{"submission":{"id":"sub"}}},"submitDraft"]);
+    let filing = json!(["Email/set",{"accountId":"acct1","updated":{"draft":null}},"submitDraft"]);
+    for (responses, success, warning) in [
+        (json!([primary, filing]), true, false),
+        (
+            json!([filing, primary, ["Email/get", {}, "unrelated"]]),
+            true,
+            false,
+        ),
+        (json!([primary]), true, true),
+        (
+            json!([primary,["error",{"type":"serverFail"},"submitDraft"]]),
+            true,
+            true,
+        ),
+        (
+            json!([primary,["Email/set",{"accountId":"acct1","notUpdated":{"draft":{"type":"forbidden"}}},"submitDraft"]]),
+            true,
+            true,
+        ),
+        (
+            json!([primary,["Email/set",{"accountId":"acct1","updated":{}},"submitDraft"]]),
+            true,
+            true,
+        ),
+        (
+            json!([primary,["Email/set",{"accountId":"other","updated":{"draft":null}},"submitDraft"]]),
+            true,
+            true,
+        ),
+        (json!([primary, primary]), false, false),
+        (
+            json!([["EmailSubmission/set",{"accountId":"acct1"},"submitDraft"]]),
+            false,
+            false,
+        ),
+        (
+            json!([["EmailSubmission/set",{"accountId":"acct1","created":{"submission":{"id":""}}},"submitDraft"]]),
+            false,
+            false,
+        ),
+        (
+            json!([["EmailSubmission/set",{"accountId":"other","created":{"submission":{"id":"sub"}}},"submitDraft"]]),
+            false,
+            false,
+        ),
+        (
+            json!([["EmailSubmission/set",{"accountId":"acct1","created":{"submission":{"id":"sub"}}},"wrong"]]),
+            false,
+            false,
+        ),
+        (
+            json!([["EmailSubmission/set",{"accountId":"acct1","notCreated":{"submission":{"type":"forbidden"}}},"submitDraft"]]),
+            false,
+            false,
+        ),
+        (
+            json!([["error",{"type":"forbidden"},"submitDraft"]]),
+            false,
+            false,
+        ),
+        (json!([]), false, false),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(body_string_contains("Mailbox/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"methodResponses":[["Mailbox/get",{"list":[
+                {"id":"drafts","name":"Drafts","role":"drafts"},
+                {"id":"sent","name":"Sent","role":"sent"},
+                {"id":"trash","name":"Trash","role":"trash"}
+            ]},"m0"]]}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(body_string_contains("EmailSubmission/set"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"methodResponses":responses})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = JmapClient::with_test_session(&server.uri());
+        let draft =
+            serde_json::from_value(json!({"id":"draft", "keywords":{"$draft":true}})).unwrap();
+        let identity =
+            serde_json::from_value(json!({"id":"pinned", "name":"Me", "email":"me@example.com"}))
+                .unwrap();
+        let mailboxes = client.prepare_draft_send().await.unwrap();
+        let result = client
+            .send_draft_with_identity(&draft, &identity, &mailboxes)
+            .await;
+        assert_eq!(result.is_ok(), success, "{responses}");
+        if let Ok(submission) = result {
+            assert_eq!(submission.id, "sub");
+            assert_eq!(submission.filing_warning.is_some(), warning, "{responses}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn draft_discard_requires_positive_update_evidence() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::body_string_contains};
+    for (payload, success) in [
+        (json!({"accountId":"acct1","updated":{"draft":null}}), true),
+        (json!({"accountId":"acct1","updated":{}}), false),
+        (json!({"accountId":"other","updated":{"draft":null}}), false),
+        (json!({"accountId":"acct1","updated":{"other":null}}), false),
+        (
+            json!({"accountId":"acct1","updated":{"draft":null},"notUpdated":{"draft":{"type":"forbidden"}}}),
+            false,
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(body_string_contains("Email/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Email/get",{
+                "accountId":"acct1","state":"fresh","list":[{"id":"draft","keywords":{"$draft":true}}],"notFound":[]
+            },"draft"]]}))).expect(1).mount(&server).await;
+        Mock::given(body_string_contains("Mailbox/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Mailbox/get",{"list":[{"id":"trash","name":"Trash","role":"trash"}]},"m0"]]})))
+            .expect(1).mount(&server).await;
+        Mock::given(body_string_contains("Email/set"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"methodResponses":[["Email/set",payload,"discardDraft"]]}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut client = JmapClient::with_test_session(&server.uri());
+        assert_eq!(
+            client.discard_draft("draft").await.is_ok(),
+            success,
+            "{payload}"
+        );
+        let requests = server.received_requests().await.unwrap();
+        let write: Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert_eq!(
+            write["methodCalls"][0][1],
+            json!({
+                "accountId":"acct1","ifInState":"fresh","update":{"draft":{"mailboxIds":{"trash":true}}}
+            })
+        );
+    }
+}
+
+#[tokio::test]
 async fn blob_measurement_counts_known_and_chunked_bodies_with_a_bound() {
     use async_graphql::futures_util::stream;
     use axum::{Router, body::Body, routing::get};

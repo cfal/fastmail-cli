@@ -980,6 +980,54 @@ the existing authenticated `/cli/v1/upload` binary endpoint and then referenced
 by `blobId`; the 25 MiB compose cap still applies. Stdio also enforces the compose
 cap. These additions do not change CLI `--attachment` behavior or its limits.
 
+### Saved Drafts Through GraphQL/MCP
+
+Send a saved draft without rebuilding its MIME content or uploading its
+attachments again:
+
+```graphql
+mutation {
+  sendDraft(emailId: "DRAFT_ID", action: PREVIEW) {
+    success preview confirmationToken error
+  }
+}
+```
+
+Show the preview, then repeat `emailId` with `action: CONFIRM` and the returned
+`confirmationToken`. Select `success emailId submissionId filingWarning error`.
+The one-shot approval binds the account, immutable Email ID, and resolved
+submission identity and role-selected filing mailboxes. Preview shows the actual
+From, recipients including BCC,
+both preferred body lists with their MIME types, and attachment/inline metadata.
+It does not download attachment content. Missing, truncated, or incorrectly
+decoded text is rejected; previews are limited to 128 listed parts and 1 MiB.
+Drafts need one From address; a different or multiple Sender addresses are
+currently unsupported. `DRAFT` is not a valid action for `sendDraft`.
+Header metadata is required; repeated From/Sender/To/Cc/Bcc/Reply-To/Subject headers are refused
+because the convenience fields can omit recipients from earlier occurrences.
+Drafts in Trash cannot be previewed or sent. A send attempt invalidates all
+outstanding approvals for the same payload, even when filing or transport fails.
+
+`submissionId` means the server accepted the submission, not that delivery
+completed. Successful sends remove the Drafts membership and `$draft` keyword,
+add Sent, and preserve other mailbox memberships and keywords. A non-null
+`filingWarning` means submission succeeded but that filing is unconfirmed:
+inspect and fix the mailboxes, **do not resend**. After an ambiguous transport
+failure, inspect Sent/submissions before trying again.
+
+`deleteDraft(emailId: "DRAFT_ID") { success error }` immediately moves a draft to
+Trash, never permanently destroys it. Its write uses the Email state from a
+fresh draft check; any intervening Email change can conservatively reject it.
+Sending rechecks `$draft`, but JMAP cannot atomically guard draft membership
+during submission. Another client can still send or move it concurrently.
+There is no automatic retry. The 25 MiB cap on new compose attachment inputs is
+not applied to existing saved drafts; server submission limits still apply.
+
+These mutations are also available through MCP's `graphql` tool. CLI compose
+flags are unchanged; no CLI send-existing-draft command or `updateDraft`
+mutation is added. Upstream draft replacement remains deferred because its
+flattened reconstruction can lose content before destroying the original.
+
 ### Composable filters
 
 `EmailFilter` mirrors JMAP's filter tree (RFC 8620 §5.5) rather than flattening
