@@ -16,6 +16,29 @@
 
 ### Fixed
 
+- Validate JMAP method, call ID, account and complete get results; require positive
+  write evidence. Preserve accepted submissions when automatic Sent filing fails,
+  and never retry uncertain writes.
+- Resolve internal Drafts, Sent and Junk destinations by unique system role, not
+  display name. Pin reply identities and remove redundant session handshakes and
+  body fetches for status messages.
+- Bound and validate arrival-change paging. Stop subscriptions explicitly when
+  change history expires instead of silently losing arrivals.
+- Preserve cursor intervals in forward/backward pagination, issue unique
+  attachment-occurrence cursors, and retain match-all operands inside OR/NOT.
+- Bound aggregate GraphQL attachment input and serialized output, share downloads,
+  and move expensive processing to cancellation-safe bounded workers. Document
+  the extraction backend's remaining allocation limitations.
+- Load thread member summaries by page and bodies only when selected, preserving
+  server ordering and public eager-thread/schema compatibility.
+- Release the shared account lock during independent GraphQL reads using
+  authenticated client snapshots, after measuring serialized network latency.
+  Mutation and compose-preview locking remains unchanged.
+- Reject ambiguous or incompletely discovered CardDAV mutation targets and use
+  unique private temporary files for concurrent config saves.
+- Reject non-object HTTP GraphQL variables, invalid download formats and oversized
+  local HTML input. Serialize fallback JSON errors correctly and correct stale SDL
+  and credential documentation.
 - Infer image MIME types for CLI attachments, including PNG, JPEG, GIF, WebP,
   BMP, TIFF, HEIC, and ICO, instead of sending them as `application/octet-stream`.
   Selectively ported from upstream [#76](https://github.com/radiosilence/fastmail-cli/pull/76).

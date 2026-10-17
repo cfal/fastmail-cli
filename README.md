@@ -424,6 +424,16 @@ and the GraphQL/MCP compose mutations' `from` argument.
 
 ### Send Email
 
+Internal compose/spam destinations use the unique Drafts, Sent and Junk roles;
+similarly named user folders do not override them. User-supplied mailbox names
+continue to take precedence over role names.
+
+Writes require positive server confirmation. An uncertain response is not a
+reason to retry automatically: inspect the account first. Once submission is
+confirmed, an automatic Sent-filing failure does not turn the send into failure.
+Ordinary send/reply/forward retain their email-ID result and log a warning
+(`RUST_LOG=warn`); saved-draft submission exposes `filingWarning` directly.
+
 ```bash
 fastmail send \
   --to "alice@example.com, bob@example.com" \
