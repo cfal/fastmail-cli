@@ -128,7 +128,7 @@ fn is_image_extension(filename: &str) -> bool {
     )
 }
 
-/// Infer MIME type from filename extension for documents
+/// Infer MIME type from filename extension
 pub fn mime_from_filename(filename: &str) -> String {
     match lowercase_extension(filename).as_str() {
         // Documents
@@ -165,6 +165,15 @@ pub fn mime_from_filename(filename: &str) -> String {
         "toml" => "application/toml",
         "rst" => "text/x-rst",
         "org" => "text/x-org",
+        // Images
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "heic" => "image/heic",
+        "ico" => "image/vnd.microsoft.icon",
         // Email
         "eml" => "message/rfc822",
         "msg" => "application/vnd.ms-outlook",
@@ -482,17 +491,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mime_from_filename_recognizes_image_extensions() {
+        for (extension, mime) in [
+            ("png", "image/png"),
+            ("jpg", "image/jpeg"),
+            ("jpeg", "image/jpeg"),
+            ("gif", "image/gif"),
+            ("webp", "image/webp"),
+            ("bmp", "image/bmp"),
+            ("tif", "image/tiff"),
+            ("tiff", "image/tiff"),
+            ("heic", "image/heic"),
+            ("ico", "image/vnd.microsoft.icon"),
+            ("svg", "image/svg+xml"),
+        ] {
+            for extension in [extension.to_string(), extension.to_ascii_uppercase()] {
+                let filename = format!("photo.{extension}");
+                assert_eq!(mime_from_filename(&filename), mime, "{filename}");
+            }
+        }
+    }
+
+    #[test]
+    fn load_attachment_uses_image_mime_type() {
+        use std::io::Write;
+        let mut file = tempfile::Builder::new().suffix(".PNG").tempfile().unwrap();
+        file.write_all(b"image payload").unwrap();
+
+        let attachment = load_attachment(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(attachment.content_type, "image/png");
+        assert_eq!(
+            attachment.filename,
+            file.path().file_name().unwrap().to_str().unwrap()
+        );
+        assert_eq!(attachment.data, b"image payload");
+    }
+
+    #[test]
     fn file_classifiers_keep_their_distinct_supported_formats() {
         for (filename, extraction_image, image, inferred, mime) in [
             ("vector.SVG", true, false, None, "image/svg+xml"),
-            (
-                "photo.JPEG",
-                true,
-                true,
-                Some("image/jpeg"),
-                "application/octet-stream",
-            ),
-            ("photo.HEIC", true, true, None, "application/octet-stream"),
+            ("photo.JPEG", true, true, Some("image/jpeg"), "image/jpeg"),
+            ("photo.HEIC", true, true, None, "image/heic"),
             ("README", false, false, None, "application/octet-stream"),
             (".png", false, false, None, "application/octet-stream"),
         ] {

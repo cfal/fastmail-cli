@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Infer image MIME types for CLI attachments, including PNG, JPEG, GIF, WebP,
+  BMP, TIFF, HEIC, and ICO, instead of sending them as `application/octet-stream`.
+  Selectively ported from upstream [#76](https://github.com/radiosilence/fastmail-cli/pull/76).
+
 ## [4.0.5] - 2026-09-15
 
 ### Added
