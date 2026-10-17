@@ -1,5 +1,116 @@
 use super::*;
 
+#[test]
+fn last_never_expands_the_interval_below_after() {
+    use super::super::connection::{PageArgs, page_of};
+    for (after, last, expected) in [("8", 5, vec![9]), ("9", 5, vec![]), ("2", 3, vec![7, 8, 9])] {
+        let page = page_of(
+            (0..10).collect(),
+            PageArgs {
+                after: Some(after.into()),
+                before: None,
+                first: None,
+                last: Some(last),
+            },
+            |n| n.to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            page.items.into_iter().map(|(_, n)| n).collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn query_and_list_pages_preserve_every_accepted_cursor_interval() {
+    use super::super::connection::{PageArgs, page_of};
+    let server = mock_server(10).await;
+    for cursor in [None, Some(0), Some(2), Some(8), Some(9)] {
+        for before in [false, true] {
+            for last in [false, true] {
+                for size in [None, Some(0), Some(1), Some(5), Some(100)] {
+                    let cursor = cursor.map(|id| format!("e{id}"));
+                    let after = if before { None } else { cursor.clone() };
+                    let before = if before { cursor.clone() } else { None };
+                    let first = if last { None } else { size };
+                    let last = if last { size } else { None };
+                    let expected = page_of(
+                        (0..10).map(|id| format!("e{id}")).collect(),
+                        PageArgs {
+                            after: after.clone(),
+                            before: before.clone(),
+                            first,
+                            last,
+                        },
+                        Clone::clone,
+                    )
+                    .unwrap();
+                    let arguments = format!(
+                        "after:{}, before:{}, first:{}, last:{}",
+                        json!(after),
+                        json!(before),
+                        json!(first),
+                        json!(last)
+                    );
+                    let response = run(&server, &format!("{{ emails({arguments}) {{ nodes {{ id }} position totalCount pageInfo {{ hasNextPage hasPreviousPage }} }} }}")).await;
+                    assert!(
+                        response.errors.is_empty(),
+                        "{arguments}: {:?}",
+                        response.errors
+                    );
+                    let data = response.data.into_json().unwrap();
+                    assert_eq!(
+                        data["emails"],
+                        json!({
+                            "nodes":expected.items.into_iter().map(|(_,id)| json!({"id":id})).collect::<Vec<_>>(),
+                            "position":expected.start,"totalCount":expected.total,
+                            "pageInfo":{"hasNextPage":expected.has_next,"hasPreviousPage":expected.has_previous}
+                        }),
+                        "{arguments}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn negative_page_sizes_are_rejected_consistently() {
+    let server = mock_server(3).await;
+    for argument in ["first: -1", "last: -1"] {
+        for query in [
+            format!("{{ emails({argument}) {{ nodes {{ id }} }} }}"),
+            format!("{{ thread(emailId: \"e0\") {{ emails({argument}) {{ nodes {{ id }} }} }} }}"),
+        ] {
+            let response = run(&server, &query).await;
+            assert_eq!(
+                response.errors[0].message,
+                "Page sizes must not be negative."
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn multi_query_pages_reject_a_changed_result_set() {
+    let server = mock_server(10).await;
+    Mock::given(method("POST")).and(wiremock::matchers::body_string_contains("Email/query"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let probe = body["methodCalls"][0][1]["anchorOffset"] == 0;
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/query", {"accountId":"acct1","ids":if probe { vec!["e2"] } else { vec!["e0","e1"] },
+                "position":if probe { 2 } else { 0 },"queryState":if probe { "old" } else { "new" }}, "q0"
+            ]]}))
+        }).with_priority(1).expect(2).mount(&server).await;
+    let response = run(&server, "{ emails(last:5, before:\"e2\") { position } }").await;
+    assert_eq!(
+        response.errors[0].message,
+        "The result set changed while paging. Restart pagination."
+    );
+}
+
 #[tokio::test]
 async fn page_info_cursors_work_without_selecting_nodes() {
     let server = mock_server(3).await;
@@ -562,7 +673,11 @@ async fn before_anchors_backward_from_the_cursor() {
     .await;
     assert!(resp.errors.is_empty(), "{:?}", resp.errors);
 
-    let args = &query_args(&server).await[0];
+    let queries = query_args(&server).await;
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0]["anchorOffset"], 0);
+    assert_eq!(queries[0]["limit"], 1);
+    let args = &queries[1];
     assert_eq!(args["anchor"], "e7");
     assert_eq!(args["anchorOffset"], -3);
 

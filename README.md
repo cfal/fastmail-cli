@@ -1094,17 +1094,21 @@ composing the follow-up query too — the cursor is just an ID it has already se
 }
 ```
 
-`last` without `before` becomes a negative `position`, which JMAP counts from
-the end — "the last N" is one call and never needs a total. `last` with `before`
-anchors backwards from the cursor.
+`first` takes the start of the cursor-bounded interval; `last` takes its end.
+Both preserve `after` and `before`, including near list boundaries. Negative
+sizes and conflicting directions are rejected. A positive `last` without a
+cursor uses JMAP's negative `position` in one call without computing a total.
+`before`, or `after` with `last`, first probes the anchor position; a result-set
+change between the probe and page returns an error asking you to restart.
 
 The trade for stability is that a cursor can go stale: if its message is deleted
 or stops matching the filter, JMAP returns `anchorNotFound`. That surfaces as an
 error saying exactly that, and that the fix is to restart pagination. Compare
 `queryState` between pages to detect that the result set moved underneath you.
 
-`totalCount` maps to JMAP's `calculateTotal`, which costs the server real work,
-so it's only requested when the field is actually selected. The same look-ahead
+`totalCount` maps to JMAP's `calculateTotal`, which costs the server real work.
+It is requested when selected, or internally for `after` with `last` and
+zero-sized pages. The same look-ahead
 means a query selecting **only** `totalCount` performs one `Email/query` and
 fetches no emails at all:
 

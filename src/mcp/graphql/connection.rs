@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use async_graphql::OutputType;
-use async_graphql::connection::{Connection, Edge, EmptyFields, query};
+use async_graphql::connection::{Connection, Edge, EmptyFields};
 use async_graphql::{Context, Result, SimpleObject};
 use serde_json::Value;
 
@@ -65,6 +65,11 @@ impl PageArgs {
         if self.after.is_some() && self.before.is_some() {
             return Err(async_graphql::Error::new(
                 "Pass `after` or `before`, not both.",
+            ));
+        }
+        if self.first.is_some_and(|n| n < 0) || self.last.is_some_and(|n| n < 0) {
+            return Err(async_graphql::Error::new(
+                "Page sizes must not be negative.",
             ));
         }
         Ok(())
@@ -139,7 +144,7 @@ pub fn page_of<T>(
             end = end.min(start + clamp_page(Some(first.max(0) as u32)) as usize);
         }
         (_, Some(last)) => {
-            start = end.saturating_sub(clamp_page(Some(last.max(0) as u32)) as usize);
+            start = start.max(end.saturating_sub(clamp_page(Some(last as u32)) as usize));
         }
         _ => end = end.min(start + clamp_page(None) as usize),
     }
@@ -304,80 +309,141 @@ pub async fn emails_connection(
             .field("endCursor")
             .exists();
 
-    query(
-        args.after,
-        args.before,
-        args.first,
-        args.last,
-        |after, before, first, last| async move {
-            let after: Option<String> = after;
-            let before: Option<String> = before;
-            let limit = clamp_page(first.or(last).map(|n| n as u32));
+    let limit = clamp_page(args.first.or(args.last).map(|n| n as u32));
+    let backward = args.last.is_some();
+    let client = ctx.data::<SharedClient>()?;
+    let client = client.lock().await;
+    let query_args = |start, limit, calculate_total, fetch_summaries| EmailQuery {
+        filter: jmap_filter.clone().unwrap_or_else(|| serde_json::json!({})),
+        sort: jmap_sort.clone(),
+        start,
+        limit,
+        calculate_total,
+        collapse_threads,
+        fetch_summaries,
+    };
 
-            // Every combination maps onto one JMAP window. `last` without a
-            // `before` is the only one that needs the negative-position form.
-            let start = match (&after, &before, last) {
-                (Some(id), _, _) => QueryStart::Anchor {
+    // Probe cursor bounds before sizing cross-direction pages. JMAP clamps
+    // negative anchor offsets at zero rather than clipping the end of the page.
+    let probe_id = args
+        .before
+        .as_ref()
+        .or(if backward { args.after.as_ref() } else { None });
+    let probe = if let Some(id) = probe_id {
+        let page = client
+            .query_emails(query_args(
+                QueryStart::Anchor {
                     id: id.clone(),
-                    offset: 1,
+                    offset: 0,
                 },
-                (_, Some(id), _) => QueryStart::Anchor {
+                1,
+                wants_total || args.after.is_some(),
+                false,
+            ))
+            .await
+            .map_err(stale_anchor_hint)?;
+        if page.ids.len() != 1 || page.ids.first() != Some(id) {
+            return Err(async_graphql::Error::new(
+                "Cursor probe did not return its anchor. Restart pagination.",
+            ));
+        }
+        Some(page)
+    } else {
+        None
+    };
+    let (start, page_limit, expected_position) = match (&args.after, &args.before, &probe) {
+        (_, Some(id), Some(probe)) => {
+            let size = u64::from(limit).min(probe.position) as u32;
+            if backward {
+                (
+                    QueryStart::Anchor {
+                        id: id.clone(),
+                        offset: -i64::from(size),
+                    },
+                    size,
+                    Some(probe.position - u64::from(size)),
+                )
+            } else {
+                (QueryStart::Position(0), size, Some(0))
+            }
+        }
+        (Some(id), _, Some(probe)) => {
+            let total = probe.total.ok_or_else(|| {
+                async_graphql::Error::new("Missing total for backward pagination.")
+            })?;
+            let lower = probe
+                .position
+                .checked_add(1)
+                .filter(|lower| *lower <= total)
+                .ok_or_else(|| async_graphql::Error::new("Invalid cursor position."))?;
+            let position = lower.max(total.saturating_sub(u64::from(limit)));
+            let offset = i64::try_from(position - probe.position)
+                .map_err(|_| async_graphql::Error::new("Cursor offset exceeds JMAP limits."))?;
+            (
+                QueryStart::Anchor {
                     id: id.clone(),
-                    offset: -(limit as i64),
+                    offset,
                 },
-                (_, _, Some(_)) => QueryStart::Position(-(limit as i64)),
-                _ => QueryStart::Position(0),
-            };
+                (total - position) as u32,
+                Some(position),
+            )
+        }
+        (Some(id), _, _) => (
+            QueryStart::Anchor {
+                id: id.clone(),
+                offset: 1,
+            },
+            limit,
+            None,
+        ),
+        _ if backward => (QueryStart::Position(-i64::from(limit)), limit, None),
+        _ => (QueryStart::Position(0), limit, None),
+    };
+    let mut page = client
+        .query_emails(query_args(
+            start,
+            page_limit,
+            wants_total || limit == 0,
+            wants_nodes,
+        ))
+        .await
+        .map_err(stale_anchor_hint)?;
+    if let Some(probe) = &probe
+        && (page.query_state != probe.query_state || Some(page.position) != expected_position)
+    {
+        return Err(async_graphql::Error::new(
+            "The result set changed while paging. Restart pagination.",
+        ));
+    }
+    if backward && limit == 0 && probe.is_none() && args.after.is_none() {
+        page.position = page
+            .total
+            .ok_or_else(|| async_graphql::Error::new("Missing total for backward pagination."))?;
+    }
 
-            let client = ctx.data::<SharedClient>()?;
-            let client = client.lock().await;
-
-            let page = client
-                .query_emails(EmailQuery {
-                    filter: jmap_filter.clone().unwrap_or_else(|| serde_json::json!({})),
-                    sort: jmap_sort.clone(),
-                    start,
-                    limit,
-                    calculate_total: wants_total,
-                    collapse_threads,
-                    fetch_summaries: wants_nodes,
-                })
-                .await
-                .map_err(stale_anchor_hint)?;
-
-            let first_index = page.position as usize;
-            let count = page.ids.len();
-
-            let has_previous = first_index > 0;
-            let has_next = match page.total {
-                Some(total) => (first_index + count) < total as usize,
-                // Without a total, a full page is the signal there may be more.
-                None => count as u32 == limit && limit > 0,
-            };
-
-            let mut conn = Connection::with_additional_fields(
-                has_previous,
-                has_next,
-                EmailConnectionFields {
-                    total_count: page.total,
-                    position: page.position,
-                    query_state: page.query_state,
-                },
-            );
-            conn.edges = page
-                .emails
-                .into_iter()
-                .map(|email| {
-                    Edge::with_additional_fields(
-                        email.id.clone(),
-                        GqlEmail::summary(email),
-                        EmptyFields,
-                    )
-                })
-                .collect();
-
-            Ok::<_, async_graphql::Error>(conn)
+    let total = page.total.or_else(|| probe.as_ref().and_then(|p| p.total));
+    let has_previous = page.position > 0;
+    let has_next = match total {
+        Some(total) => page.position + (page.ids.len() as u64) < total,
+        None if args.before.is_some() => true,
+        None if backward => false,
+        None => page.ids.len() as u32 == page_limit && page_limit > 0,
+    };
+    let mut conn = Connection::with_additional_fields(
+        has_previous,
+        has_next,
+        EmailConnectionFields {
+            total_count: if wants_total { total } else { None },
+            position: page.position,
+            query_state: page.query_state,
         },
-    )
-    .await
+    );
+    conn.edges = page
+        .emails
+        .into_iter()
+        .map(|email| {
+            Edge::with_additional_fields(email.id.clone(), GqlEmail::summary(email), EmptyFields)
+        })
+        .collect();
+    Ok(conn)
 }

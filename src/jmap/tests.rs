@@ -1,6 +1,28 @@
 use super::*;
 
 #[tokio::test]
+async fn query_windows_reject_duplicate_oversized_or_overflowing_results() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for (ids, position) in [
+        (json!(["e1", "e1"]), 0),
+        (json!(["e1", "e2", "e3"]), 0),
+        (json!([""]), 0),
+        (json!(["e1"]), u64::MAX),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+            "Email/query", {"accountId":"acct1","queryState":"q1","ids":ids,"position":position}, "q0"
+        ]]}))).expect(1).mount(&server).await;
+        let mut query = EmailQuery::first(2);
+        query.fetch_summaries = false;
+        assert!(
+            matches!(JmapClient::with_test_session(&server.uri()).query_emails(query).await,
+            Err(Error::Jmap { error_type, .. }) if error_type == "parse")
+        );
+    }
+}
+
+#[tokio::test]
 async fn compose_and_spam_use_unique_system_roles_from_one_mailbox_snapshot() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
     for operation in ["send", "draft", "spam"] {

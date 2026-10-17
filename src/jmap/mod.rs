@@ -973,6 +973,22 @@ impl JmapClient {
 
         let query_resp: QueryResponse =
             responses::parse(&responses, "Email/query", "q0", account_id)?;
+        let mut seen = std::collections::HashSet::new();
+        if query_resp.ids.len() > query.limit as usize
+            || query_resp
+                .ids
+                .iter()
+                .any(|id| id.is_empty() || !seen.insert(id))
+            || query_resp
+                .position
+                .checked_add(query_resp.ids.len() as u64)
+                .is_none()
+        {
+            return Err(responses::invalid(
+                "Email/query",
+                "Invalid or oversized query window",
+            ));
+        }
 
         let mut emails = Vec::new();
         if query.fetch_summaries {
