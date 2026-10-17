@@ -109,50 +109,49 @@ fn prepare_with_limit(
     if inputs.len() > MAX_ATTACHMENTS {
         return Err("At most 128 attachments are allowed".into());
     }
-    let mut total = 0;
-    inputs
-        .into_iter()
-        .map(|input| {
-            let (name, content_type) = name_and_type(input.name, input.content_type)?;
-            let mut descriptor = json!({"name": name, "contentType": content_type});
-            let (content, size) = match (input.base64, input.blob_id) {
-                (Some(encoded), None) => {
-                    let bytes = decode(&encoded, byte_limit - total)?;
-                    let size = bytes.len();
-                    let digest: String = Sha256::digest(&bytes)
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect();
-                    descriptor["sha256"] = json!(digest);
-                    descriptor["size"] = json!(size);
-                    (AttachmentContent::Bytes(bytes), size)
+    let mut inline_bytes = 0;
+    let mut attachments = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let (name, content_type) = name_and_type(input.name, input.content_type)?;
+        let mut descriptor = json!({"name": name, "contentType": content_type});
+        let (content, size) = match (input.base64, input.blob_id) {
+            (Some(encoded), None) => {
+                let bytes = decode(&encoded, byte_limit - inline_bytes)?;
+                let size = bytes.len();
+                let digest: String = Sha256::digest(&bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                descriptor["sha256"] = json!(digest);
+                descriptor["size"] = json!(size);
+                (AttachmentContent::Bytes(bytes), size)
+            }
+            (None, Some(id)) => {
+                if id.is_empty()
+                    || id.len() > 255
+                    || !id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                {
+                    return Err("Attachment blobId must be a valid JMAP Id".into());
                 }
-                (None, Some(id)) => {
-                    if id.is_empty()
-                        || id.len() > 255
-                        || !id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-                    {
-                        return Err("Attachment blobId must be a valid JMAP Id".into());
-                    }
-                    descriptor["blobId"] = json!(id);
-                    (AttachmentContent::Blob(id), 0)
-                }
-                _ => return Err("Give exactly one of base64 and blobId for each attachment".into()),
-            };
-            total += size;
-            Ok(Attachment {
-                data: OutgoingAttachment {
-                    filename: name,
-                    content_type,
-                    content,
-                },
-                size,
-                descriptor,
-            })
-        })
-        .collect()
+                descriptor["blobId"] = json!(id);
+                (AttachmentContent::Blob(id), 0)
+            }
+            _ => return Err("Give exactly one of base64 and blobId for each attachment".into()),
+        };
+        inline_bytes += size;
+        attachments.push(Attachment {
+            data: OutgoingAttachment {
+                filename: name,
+                content_type,
+                content,
+            },
+            size,
+            descriptor,
+        });
+    }
+    Ok(attachments)
 }
 
 pub(super) async fn measure_preview(
@@ -171,10 +170,8 @@ async fn measure(
 ) -> Result<(), String> {
     let mut total: usize = attachments
         .iter()
-        .filter_map(|attachment| {
-            matches!(attachment.data.content, AttachmentContent::Bytes(_))
-                .then_some(attachment.size)
-        })
+        .filter(|attachment| matches!(attachment.data.content, AttachmentContent::Bytes(_)))
+        .map(|attachment| attachment.size)
         .sum();
     if total > byte_limit {
         return Err(over_limit());

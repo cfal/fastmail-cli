@@ -514,7 +514,6 @@ mod tests {
 
     #[test]
     fn load_attachment_uses_image_mime_type() {
-        use std::io::Write;
         let mut file = tempfile::Builder::new().suffix(".PNG").tempfile().unwrap();
         file.write_all(b"image payload").unwrap();
 
