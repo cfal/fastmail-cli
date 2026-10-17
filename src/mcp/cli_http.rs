@@ -9,7 +9,7 @@ use http::{HeaderMap, StatusCode, header};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{FastmailMcp, client_for};
+use super::{FastmailMcp, cached_client, client_for};
 use crate::{
     carddav::{ContactEmail, ContactFields, ContactPhone},
     error::Error,
@@ -64,9 +64,52 @@ async fn client(mcp: &FastmailMcp) -> Result<JmapClient, ApiError> {
 }
 
 async fn session(State(mcp): State<FastmailMcp>) -> Result<Json<crate::models::Session>, ApiError> {
-    let shared = shared_client(&mcp).await?;
+    let token = mcp
+        .default_token
+        .as_deref()
+        .ok_or_else(|| Error::Config("Configure Fastmail credentials on the server".into()))?;
+    let shared = cached_client(&mcp.clients, token)
+        .await
+        .map_err(|_| Error::Server("Server could not authenticate with Fastmail".into()))?;
     let mut client = shared.lock().await;
-    Ok(Json(client.authenticate().await?.clone()))
+    let cold = client.session().is_err();
+    let session = client.authenticate().await.map_err(|error| {
+        if cold {
+            Error::Server("Server could not authenticate with Fastmail".into())
+        } else {
+            error
+        }
+    })?;
+    Ok(Json(session.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_probes_once_on_both_cold_and_warm_requests() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        let authenticated = JmapClient::with_test_session(&format!("{}/jmap", server.uri()));
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(authenticated.session().unwrap()),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mcp = FastmailMcp::build(Some("token".into()));
+        mcp.clients.lock().await.insert(
+            "token".into(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(
+                JmapClient::with_test_session_endpoint(&server.uri()),
+            )),
+        );
+        for _ in 0..2 {
+            assert!(session(State(mcp.clone())).await.is_ok());
+        }
+    }
 }
 
 #[derive(Deserialize)]
