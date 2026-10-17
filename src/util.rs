@@ -479,16 +479,40 @@ pub fn resolve_html(
         return Ok(Some(html));
     }
     if let Some(path) = html_file {
-        let content = std::fs::read_to_string(&path)
+        let content = read_html_file(&path, MAX_ATTACHMENT_BYTES)
             .map_err(|e| anyhow::anyhow!("Failed to read HTML file '{}': {}", path, e))?;
         return Ok(Some(content));
     }
     Ok(None)
 }
 
+fn read_html_file(path: &str, limit: usize) -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= limit, "HTML file exceeds {limit} byte limit");
+    Ok(String::from_utf8(bytes)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_file_read_enforces_the_exact_byte_limit() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"<b>ok</b>").unwrap();
+        let path = file.path().to_str().unwrap();
+        assert_eq!(read_html_file(path, 9).unwrap(), "<b>ok</b>");
+        assert!(
+            read_html_file(path, 8)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds")
+        );
+    }
 
     #[test]
     fn mime_from_filename_recognizes_image_extensions() {
