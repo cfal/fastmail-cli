@@ -33,7 +33,7 @@ async fn server_with_identities(identities: Value) -> MockServer {
                     "Email/query" => json!({"ids":["e1"],"queryState":"s1","position":0,"total":1}),
                     "Email/get" => json!({"state":"s1","list":[{"id":"e1","threadId":"t1","subject":"Remote message","from":[{"email":"sender@example.com"}],"textBody":[{"partId":"text","type":"text/plain"}],"bodyValues":{"text":{"value":"Message body"}},"attachments":[{"blobId":"blob1","name":"notes.txt","type":"text/plain","size":10}]}]}),
                     "Thread/get" => json!({"list":[{"id":"t1","emailIds":["e1"]}]}),
-                    "Email/changes" => json!({"newState":"s1","hasMoreChanges":false,"created":[]}),
+                    "Email/changes" => json!({"oldState":call[1]["sinceState"],"newState":"s1","hasMoreChanges":false,"created":[],"updated":[],"destroyed":[]}),
                     "Email/set" => json!({"created":{"email":{"id":"new"}},"updated":{"e1":null}}),
                     "EmailSubmission/set" => json!({"created":{"submission":{"id":"submitted"}}}),
                     "MaskedEmail/get" => json!({"list":[]}),
@@ -523,7 +523,7 @@ async fn readable_watch_is_flushed_ndjson_only_for_full_arrivals() {
         let server = readable_email_server().await;
         Mock::given(body_string_contains("Email/changes"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
-                "Email/changes", {"accountId":"acct","newState":"s1","hasMoreChanges":false,"created":["e1"],"updated":[],"destroyed":[]}, "c0"
+                "Email/changes", {"accountId":"acct","oldState":"s0","newState":"s1","hasMoreChanges":false,"created":["e1"],"updated":[],"destroyed":[]}, "c0"
             ]]}))).with_priority(1).mount(&server).await;
         let mut child = command(&server, home.path())
             .args(["watch", "--poll", "1"])

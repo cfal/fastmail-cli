@@ -1095,23 +1095,7 @@ impl JmapClient {
     /// mail.
     #[instrument(skip(self))]
     pub async fn email_state(&self) -> Result<String> {
-        let account_id = self.account_id()?;
-
-        let responses = self
-            .request(vec![json!([
-                "Email/get",
-                { "accountId": account_id, "ids": [] },
-                "s0"
-            ])])
-            .await?;
-
-        #[derive(Deserialize)]
-        struct StateOnly {
-            state: String,
-        }
-
-        let resp: StateOnly = responses::get(&responses, "Email/get", "s0", account_id, Some(&[]))?;
-        Ok(resp.state)
+        Ok(self.email_checkpoint().await?.state)
     }
 
     /// IDs of emails created since `since_state`, and the state they leave the
@@ -1125,48 +1109,15 @@ impl JmapClient {
     /// Fails with a `cannotCalculateChanges` JMAP error when the server has
     /// discarded history back that far; the caller resyncs via
     /// [`Self::email_state`].
+    /// Uses the same validated, bounded collector as [`Self::email_change_batch`];
+    /// malformed or oversized windows return no partial state.
     #[instrument(skip(self))]
     pub async fn email_changes(&self, since_state: &str) -> Result<EmailChanges> {
-        let account_id = self.account_id()?;
-        let mut state = since_state.to_string();
-        let mut created = Vec::new();
-
-        loop {
-            let responses = self
-                .request(vec![json!([
-                    "Email/changes",
-                    {
-                        "accountId": account_id,
-                        "sinceState": state,
-                        "maxChanges": CHANGES_PAGE
-                    },
-                    "c0"
-                ])])
-                .await?;
-
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct ChangesResponse {
-                new_state: String,
-                #[serde(default)]
-                has_more_changes: bool,
-                #[serde(default)]
-                created: Vec<String>,
-            }
-
-            let resp: ChangesResponse =
-                responses::parse(&responses, "Email/changes", "c0", account_id)?;
-
-            created.extend(resp.created);
-            state = resp.new_state;
-
-            if !resp.has_more_changes {
-                return Ok(EmailChanges {
-                    new_state: state,
-                    created,
-                });
-            }
-        }
+        let batch = self.email_change_batch(since_state).await?;
+        Ok(EmailChanges {
+            new_state: batch.new_state,
+            created: batch.created,
+        })
     }
 
     /// Open the JMAP push channel and return the live response to read frames

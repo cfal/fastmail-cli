@@ -73,8 +73,17 @@ async fn subscription_does_not_retain_lazy_records_between_events() {
         .mount(&server)
         .await;
     Mock::given(body_string_contains("Email/changes"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Email/changes", {"accountId":"acct1","newState":"s1", "created":["e0"], "updated":[], "destroyed":[], "hasMoreChanges":false}, "c0"]]})))
-        .with_priority(1).mount(&server).await;
+        .respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let previous = body["methodCalls"][0][1]["sinceState"].as_str().unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Email/changes", {
+                "accountId":"acct1","oldState":previous,"newState":format!("{previous}-next"),
+                "created":["e0"], "updated":[], "destroyed":[], "hasMoreChanges":false
+            }, "c0"]]}))
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
     let schema = build_schema();
     let req = request(
         "subscription { emails(pollSeconds: 1) { id textBody readableBody { format content } } }",

@@ -114,11 +114,10 @@ impl ArrivalWatcher {
 
     /// Block until the next wake-up, then report what arrived.
     ///
-    /// Errors are returned only when the watcher can never succeed again — a
-    /// dead credential. Everything else is transient by nature (a dropped
-    /// connection, a bad response, a server that has forgotten our cursor) and
-    /// is retried internally with backoff, because a watcher that exits on one
-    /// blip is useless in the loop it exists to feed.
+    /// Authentication, invalid protocol results, and exhausted change limits
+    /// terminate reconciliation without advancing the checkpoint. Transient
+    /// transport failures are retried with backoff; expired history is reported
+    /// through `resynced` after obtaining the current state.
     pub async fn next_arrivals(&mut self) -> Result<Arrivals> {
         if self.retry_pending {
             sleep_backoff(&mut self.retry_backoff).await;
@@ -299,9 +298,10 @@ fn in_mailbox(email: &Email, mailbox_id: Option<&str>) -> bool {
     mailbox_id.is_none_or(|id| email.mailbox_ids.contains_key(id))
 }
 
-/// Whether an error means the watcher can never succeed again.
+/// Fail closed instead of repeatedly collecting an invalid or oversized window.
 fn is_fatal(e: &Error) -> bool {
     matches!(e, Error::InvalidToken(_) | Error::NotAuthenticated)
+        || matches!(e, Error::Jmap { error_type, .. } if matches!(error_type.as_str(), "parse" | "limitExceeded" | "invalidArguments"))
 }
 
 #[cfg(test)]
@@ -332,7 +332,7 @@ mod tests {
             .and(body_string_contains("Email/changes"))
             .and(body_string_contains(r#""sinceState":"s0""#))
             .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", json!({
-                "accountId":"test-account", "newState": "s1", "created": created, "updated": [], "destroyed": [], "hasMoreChanges": false
+                "accountId":"test-account", "oldState":"s0", "newState": "s1", "created": created, "updated": [], "destroyed": [], "hasMoreChanges": false
             }))))
             .mount(&server).await;
         Mock::given(method("POST"))
@@ -346,6 +346,60 @@ mod tests {
             .mount(&server)
             .await;
         server
+    }
+
+    #[tokio::test]
+    async fn invalid_or_oversized_change_windows_end_without_retrying_or_advancing() {
+        for failure in [
+            "stalled",
+            "cyclic",
+            "missing",
+            "account",
+            "oldState",
+            "limitExceeded",
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let call = &body["methodCalls"][0];
+                    assert_eq!(call[0], "Email/changes");
+                    if failure == "limitExceeded" {
+                        return ResponseTemplate::new(200).set_body_json(jmap_response(
+                            "error",
+                            json!({"type":"limitExceeded"}),
+                        ));
+                    }
+                    let state = call[1]["sinceState"].as_str().unwrap();
+                    let mut page = json!({
+                        "accountId":"test-account", "oldState":state,
+                        "newState":if failure == "stalled" || state == "s1" { "s0" } else { "s1" },
+                        "hasMoreChanges":true,"created":[],"updated":[],"destroyed":[]
+                    });
+                    match failure {
+                        "missing" => {
+                            page.as_object_mut().unwrap().remove("destroyed");
+                        }
+                        "account" => page["accountId"] = json!("other"),
+                        "oldState" => page["oldState"] = json!("other"),
+                        _ => {}
+                    }
+                    ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", page))
+                })
+                .expect(if failure == "cyclic" { 2 } else { 1 })
+                .mount(&server)
+                .await;
+            let mut watcher = watcher(mock_client(&server.uri()), true);
+            watcher.retry_pending = true;
+            watcher.retry_backoff = 0;
+            let error = tokio::time::timeout(Duration::from_secs(2), watcher.next_arrivals())
+                .await
+                .unwrap()
+                .err()
+                .expect("invalid change window must stop the watcher");
+            assert!(is_fatal(&error), "{failure}: {error}");
+            assert_eq!(watcher.state, "s0");
+        }
     }
 
     #[tokio::test]
@@ -428,7 +482,7 @@ mod tests {
             .and(body_string_contains("Email/changes"))
             .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
                 "Email/changes",
-                json!({"accountId":"test-account","newState":"s1", "created":[], "updated":["old"], "destroyed":["gone"], "hasMoreChanges":false}),
+                json!({"accountId":"test-account","oldState":"s0","newState":"s1", "created":[], "updated":["old"], "destroyed":["gone"], "hasMoreChanges":false}),
             )))
             .expect(1)
             .mount(&server)
