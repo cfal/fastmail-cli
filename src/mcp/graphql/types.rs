@@ -14,6 +14,7 @@ use std::sync::Arc;
 use super::attachment_cursor::attachment_connection;
 use super::attachment_scope::{AttachmentScope, AttachmentScopes, base64_size, process};
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
+use base64::{Engine, engine::general_purpose::STANDARD};
 
 use super::connection::{
     EmailConnection, ListConnection, Page, PageArgs, emails_connection, page_complexity, page_of,
@@ -609,9 +610,8 @@ pub struct GqlAttachment {
 }
 
 impl GqlAttachment {
-    /// The blob's bytes, through the loader so sibling fields on this
-    /// attachment — and every other attachment resolving at the same time —
-    /// share one batch of downloads rather than one each.
+    // Official requests share bytes through their scope; custom library schemas
+    // may still inject only the public blob loader.
     async fn bytes(
         &self,
         ctx: &Context<'_>,
@@ -676,8 +676,7 @@ impl GqlAttachment {
                 .as_ref()
                 .map(|scope| scope.reserve(size, size))
                 .transpose()?;
-            let encoded =
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data.as_slice());
+            let encoded = STANDARD.encode(data.as_slice());
             if let Some(reservation) = reservation {
                 reservation.commit(size)?;
             }
@@ -724,8 +723,7 @@ impl GqlAttachment {
                 .map_or(limit, |reserved| limit.min((reserved.capacity - 2) / 4 * 3));
             let (resized, _mime) = crate::util::resize_image(&data, &mime, limit)
                 .map_err(|e| async_graphql::Error::new(format!("Failed to process image: {e}")))?;
-            let encoded =
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &resized);
+            let encoded = STANDARD.encode(&resized);
             if let Some(reservation) = reservation {
                 reservation.commit(base64_size(resized.len()))?;
             }

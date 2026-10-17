@@ -10,10 +10,8 @@ use async_graphql::{Context, Result, Subscription};
 use std::time::Duration;
 
 use super::SharedClient;
-use super::loaders::to_gql_error;
 use super::types::GqlEmail;
 use crate::jmap::ArrivalWatcher;
-use std::sync::Arc;
 
 pub struct SubscriptionRoot;
 
@@ -87,7 +85,7 @@ impl SubscriptionRoot {
             poll_seconds.map(Duration::from_secs),
         )
         .await
-        .map_err(|e| to_gql_error(Arc::new(e)))?;
+        .map_err(|error| async_graphql::Error::new(error.to_string()))?;
 
         let batches = stream::unfold(Watching::Live(Box::new(watcher)), |state| async move {
             let Watching::Live(mut watcher) = state else {
@@ -109,15 +107,20 @@ impl SubscriptionRoot {
                     Ok(arrivals) => {
                         return Some((Ok(arrivals.emails), Watching::Live(watcher)));
                     }
-                    Err(e) => return Some((Err(to_gql_error(Arc::new(e))), Watching::Done)),
+                    Err(error) => {
+                        return Some((
+                            Err(async_graphql::Error::new(error.to_string())),
+                            Watching::Done,
+                        ));
+                    }
                 }
             }
         });
 
         Ok(batches
-            .flat_map(move |batch| match batch {
-                Ok(emails) => stream::iter(
-                    emails
+            .flat_map(move |batch| {
+                let items = match batch {
+                    Ok(emails) => emails
                         .into_iter()
                         .map(|email| {
                             Ok(if full {
@@ -127,8 +130,9 @@ impl SubscriptionRoot {
                             })
                         })
                         .collect::<Vec<_>>(),
-                ),
-                Err(e) => stream::iter(vec![Err(e)]),
+                    Err(error) => vec![Err(error)],
+                };
+                stream::iter(items)
             })
             .map(move |item| {
                 // async-graphql resolves each emitted item before polling the next.

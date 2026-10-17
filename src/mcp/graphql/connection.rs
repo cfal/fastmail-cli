@@ -216,18 +216,12 @@ pub(crate) fn thread_page_connection(page: Page<GqlEmail>) -> EmailConnection {
 }
 
 pub(crate) fn wants_connection_nodes(ctx: &Context<'_>) -> bool {
-    ctx.look_ahead().field("edges").exists()
-        || ctx.look_ahead().field("nodes").exists()
-        || ctx
-            .look_ahead()
-            .field("pageInfo")
-            .field("startCursor")
-            .exists()
-        || ctx
-            .look_ahead()
-            .field("pageInfo")
-            .field("endCursor")
-            .exists()
+    let selection = ctx.look_ahead();
+    let page_info = selection.field("pageInfo");
+    selection.field("edges").exists()
+        || selection.field("nodes").exists()
+        || page_info.field("startCursor").exists()
+        || page_info.field("endCursor").exists()
 }
 
 /// Cost of a connection field for the complexity limit: the page size the

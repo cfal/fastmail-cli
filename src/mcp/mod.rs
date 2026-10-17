@@ -243,17 +243,18 @@ markAsRead, markAsSpam, and the remaining filter and sort options."
         if let Err(message) = graphql::check_query(&req.query) {
             return Self::error_result(message);
         }
-        let variables = match req.variables.as_deref() {
-            Some(raw) => match serde_json::from_str(raw) {
-                Ok(value) => match graphql_variables(Some(value)) {
-                    Ok(variables) => variables,
-                    Err(error) => return Self::error_result(error),
-                },
-                Err(error) => {
-                    return Self::error_result(format!("Invalid variables JSON: {error}"));
-                }
-            },
-            None => async_graphql::Variables::default(),
+        let raw_variables = match req
+            .variables
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(error) => return Self::error_result(format!("Invalid variables JSON: {error}")),
+        };
+        let variables = match graphql_variables(raw_variables) {
+            Ok(variables) => variables,
+            Err(error) => return Self::error_result(error),
         };
         let Some(token) = self.default_token.as_deref() else {
             return Self::error_result(

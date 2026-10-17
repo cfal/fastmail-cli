@@ -211,9 +211,7 @@ mod tests {
 
     #[test]
     fn renewing_does_not_reset_inflight_scope() {
-        let scopes = AttachmentScopes(Arc::new(Mutex::new(Arc::new(AttachmentScope::new(
-            10, 20, 2,
-        )))));
+        let scopes = AttachmentScopes::with_limits(10, 20, 2);
         let first = scopes.current();
         first.charge_input(10).unwrap();
         scopes.renew();
