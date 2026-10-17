@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_graphql::{
     Request, ServerError, ServerResult,
     extensions::{Extension, ExtensionContext, ExtensionFactory, NextPrepareRequest},
-    parser::types::{ExecutableDocument, Selection},
+    parser::types::{ExecutableDocument, OperationType, Selection},
 };
 
 const MAX_QUERY_BYTES: usize = 64 * 1024;
@@ -120,6 +120,42 @@ fn check_expansion(
 
 pub(super) struct InputLimits;
 
+fn check_subscription_roots(document: &ExecutableDocument) -> ServerResult<()> {
+    // Run after check_expansion. Even repeated root fields with the same alias
+    // produce independent streams in async-graphql, so count occurrences.
+    for (_, operation) in document.operations.iter() {
+        if operation.node.ty != OperationType::Subscription {
+            continue;
+        }
+        let mut fields = 0;
+        let mut pending = vec![&operation.node.selection_set];
+        while let Some(selections) = pending.pop() {
+            for selection in &selections.node.items {
+                match &selection.node {
+                    Selection::Field(_) => fields += 1,
+                    Selection::InlineFragment(fragment) => {
+                        pending.push(&fragment.node.selection_set)
+                    }
+                    Selection::FragmentSpread(spread) => {
+                        if let Some(fragment) =
+                            document.fragments.get(&spread.node.fragment_name.node)
+                        {
+                            pending.push(&fragment.node.selection_set);
+                        }
+                    }
+                }
+            }
+        }
+        if fields != 1 {
+            return Err(ServerError::new(
+                "A subscription must select exactly one expanded root field; use separate requests for independent streams",
+                Some(operation.pos),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl ExtensionFactory for InputLimits {
     fn create(&self) -> Arc<dyn Extension> {
         Arc::new(Self)
@@ -140,6 +176,7 @@ impl Extension for InputLimits {
             MAX_EXPANDED_SELECTIONS,
             MAX_SYNTAX_DEPTH,
         )?;
+        check_subscription_roots(request.parsed_query()?)?;
         next.run(ctx, request).await
     }
 }

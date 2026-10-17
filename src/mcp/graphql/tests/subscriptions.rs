@@ -1,6 +1,34 @@
 use super::*;
 
 #[tokio::test]
+async fn multiple_subscription_roots_are_rejected_before_upstream_work() {
+    use async_graphql::futures_util::StreamExt;
+    for query in [
+        "subscription { a:emails(pollSeconds:1) { id } b:emails(pollSeconds:1) { id } }",
+        "subscription { emails(pollSeconds:1) { id } emails(pollSeconds:1) { id } }",
+        "subscription { a:emails(pollSeconds:1) { id } ...Extra } fragment Extra on SubscriptionRoot { b:emails(pollSeconds:1) { id } }",
+        "subscription { ... on SubscriptionRoot { a:emails(pollSeconds:1) { id } b:emails(pollSeconds:1) { id } } }",
+    ] {
+        let server = mock_server(1).await;
+        let schema = build_schema();
+        let mut stream =
+            schema.execute_stream(request(query, client_for(&server), CardDavCreds::default()));
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.errors.len(), 1);
+        assert!(
+            response.errors[0]
+                .message
+                .contains("exactly one expanded root field")
+        );
+        assert!(stream.next().await.is_none());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn subscription_reports_expired_history_and_ends() {
     use async_graphql::futures_util::StreamExt;
     use wiremock::matchers::body_string_contains;

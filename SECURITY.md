@@ -87,6 +87,9 @@ escaping), 1,024 unique blob IDs, and four concurrent downloads. The existing
 but each returned payload counts against the output budget. Partial failed or
 cancelled downloads remain charged. Each subscription emission gets a fresh
 scope; work already started retains its original scope.
+Subscription operations must contain exactly one expanded root field, including
+aliases and fragment occurrences, so independent streams cannot rotate each
+other's attachment scope. Use separate requests for independent subscriptions.
 
 Base64 encoding, image conversion, and document extraction share two process-wide
 blocking-worker slots. Cancellation does not release a slot while its job is
