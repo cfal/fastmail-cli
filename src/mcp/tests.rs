@@ -283,6 +283,37 @@ async fn graphql_transports_check_syntax_before_authentication() {
 }
 
 #[tokio::test]
+async fn invalid_http_variables_are_rejected_before_credentials_or_mutations() {
+    let mcp = FastmailMcp::build(None);
+    for variables in [
+        serde_json::json!(false),
+        serde_json::json!([]),
+        serde_json::json!("text"),
+        serde_json::Value::Null,
+    ] {
+        let error = build_http_request(&mcp, HttpGraphqlRequest {
+            query: "mutation($read: Boolean) { markAsRead(emailId: \"id\", read: $read) { success } }".into(),
+            variables: Some(variables), operation_name: None,
+        }).await.err().unwrap();
+        assert_eq!(error, "Variables must be a JSON object");
+    }
+    let request = build_http_request(
+        &mcp,
+        HttpGraphqlRequest {
+            query: "query($name: String!) { __type(name: $name) { name } }".into(),
+            variables: Some(serde_json::json!({"name":"QueryRoot"})),
+            operation_name: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mcp.schema.execute(request).await.data.into_json().unwrap()["__type"]["name"],
+        "QueryRoot"
+    );
+}
+
+#[tokio::test]
 async fn http_auth_and_browser_policy_cover_every_surface() {
     let mut file = tempfile::NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut file, b"[users]\nalice = 'password'\nbob = 'second'").unwrap();

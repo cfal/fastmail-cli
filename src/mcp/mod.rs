@@ -243,6 +243,18 @@ markAsRead, markAsSpam, and the remaining filter and sort options."
         if let Err(message) = graphql::check_query(&req.query) {
             return Self::error_result(message);
         }
+        let variables = match req.variables.as_deref() {
+            Some(raw) => match serde_json::from_str(raw) {
+                Ok(value) => match graphql_variables(Some(value)) {
+                    Ok(variables) => variables,
+                    Err(error) => return Self::error_result(error),
+                },
+                Err(error) => {
+                    return Self::error_result(format!("Invalid variables JSON: {error}"));
+                }
+            },
+            None => async_graphql::Variables::default(),
+        };
         let Some(token) = self.default_token.as_deref() else {
             return Self::error_result(
                 "No Fastmail token available. Configure one on the server via `fastmail auth`.",
@@ -258,27 +270,13 @@ markAsRead, markAsSpam, and the remaining filter and sort options."
             Err(e) => return Self::error_result(format!("Fastmail authentication failed: {e}")),
         };
 
-        let mut request = graphql::request(&req.query, client, self.default_carddav.clone());
-
-        if let Some(ref vars) = req.variables {
-            match serde_json::from_str::<serde_json::Value>(vars) {
-                Ok(serde_json::Value::Object(map)) => {
-                    request = request.variables(async_graphql::Variables::from_json(
-                        serde_json::Value::Object(map),
-                    ));
-                }
-                Ok(_) => {
-                    return Self::error_result("Variables must be a JSON object");
-                }
-                Err(e) => {
-                    return Self::error_result(format!("Invalid variables JSON: {e}"));
-                }
-            }
-        }
+        let request =
+            graphql::request(&req.query, client, self.default_carddav.clone()).variables(variables);
 
         let response = self.schema.execute(request).await;
-        let json = serde_json::to_string_pretty(&response)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Serialization failed: {e}\"}}"));
+        let json = serde_json::to_string_pretty(&response).unwrap_or_else(|e| {
+            serde_json::json!({"error":format!("Serialization failed: {e}")}).to_string()
+        });
 
         Self::text_result(json)
     }
@@ -447,17 +445,26 @@ fn is_local_query(query: &str, allow_session: bool, operation_name: Option<&str>
     true
 }
 
+fn graphql_variables(
+    value: Option<serde_json::Value>,
+) -> std::result::Result<async_graphql::Variables, String> {
+    match value {
+        None => Ok(async_graphql::Variables::default()),
+        Some(value @ serde_json::Value::Object(_)) => {
+            Ok(async_graphql::Variables::from_json(value))
+        }
+        Some(_) => Err("Variables must be a JSON object".into()),
+    }
+}
+
 /// Resolve credentials and build the GraphQL request an HTTP body describes.
-///
-/// Shared by the query and subscription endpoints so they cannot drift on which
-/// token wins or what counts as introspection. The error case is a message for
-/// the caller, not a status code — GraphQL reports its own failures in the
-/// response body.
+/// Shared by query and subscription endpoints; errors use GraphQL envelopes.
 async fn build_http_request(
     mcp: &FastmailMcp,
     req: HttpGraphqlRequest,
 ) -> std::result::Result<async_graphql::Request, String> {
     graphql::check_query(&req.query)?;
+    let variables = graphql_variables(req.variables)?;
     // Introspection is answered from the schema, so it neither needs a token nor
     // touches the network — the IDE stays usable while credentials are wrong.
     let mut request = if is_introspection_only(&req.query) {
@@ -483,9 +490,7 @@ async fn build_http_request(
         };
         graphql::request(&req.query, client, mcp.default_carddav.clone())
     };
-    if let Some(vars) = req.variables {
-        request = request.variables(async_graphql::Variables::from_json(vars));
-    }
+    request = request.variables(variables);
     if let Some(name) = req.operation_name {
         request = request.operation_name(name);
     }
@@ -532,8 +537,9 @@ async fn graphql_stream_endpoint(
         .schema
         .execute_stream(request)
         .map(|response| {
-            let data = serde_json::to_string(&response)
-                .unwrap_or_else(|e| format!(r#"{{"errors":[{{"message":"{e}"}}]}}"#));
+            let data = serde_json::to_string(&response).unwrap_or_else(|e| {
+                serde_json::json!({"errors":[{"message":e.to_string()}]}).to_string()
+            });
             Ok::<_, std::convert::Infallible>(sse::Event::default().event("next").data(data))
         })
         .chain(async_graphql::futures_util::stream::once(async {
