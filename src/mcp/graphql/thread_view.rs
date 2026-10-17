@@ -46,6 +46,16 @@ struct LazyThread {
     id: String,
 }
 
+pub(super) fn validate_member_ids(ids: &[String]) -> Result<()> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    if ids.iter().any(|id| id.is_empty() || !seen.insert(id)) {
+        return Err(async_graphql::Error::new(
+            "Thread contains empty or duplicate email IDs; restart pagination",
+        ));
+    }
+    Ok(())
+}
+
 impl LazyThread {
     async fn email_ids(&self, ctx: &Context<'_>) -> Result<Vec<String>> {
         let ids = ctx
@@ -54,12 +64,7 @@ impl LazyThread {
             .await
             .map_err(to_gql_error)?
             .unwrap_or_default();
-        let mut seen = HashSet::with_capacity(ids.len());
-        if ids.iter().any(|id| id.is_empty() || !seen.insert(id)) {
-            return Err(async_graphql::Error::new(
-                "Thread contains empty or duplicate email IDs; restart pagination",
-            ));
-        }
+        validate_member_ids(&ids)?;
         Ok(ids)
     }
 }

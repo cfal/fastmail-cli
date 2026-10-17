@@ -1253,6 +1253,7 @@ impl GqlThread {
             .map_err(to_gql_error)?
             .unwrap_or_default();
 
+        super::thread_view::validate_member_ids(&ids)?;
         let loaded = load_emails(ctx, ids.clone()).await?;
         let emails = ids
             .iter()

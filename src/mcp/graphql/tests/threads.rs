@@ -103,6 +103,38 @@ async fn public_thread_load_remains_eager_even_for_a_one_email_page() {
 }
 
 #[tokio::test]
+async fn eager_thread_loading_rejects_duplicate_or_empty_member_ids_before_fetching() {
+    use wiremock::matchers::body_string_contains;
+    for ids in [json!(["e0", "e0"]), json!([""])] {
+        let server = mock_server(1).await;
+        Mock::given(body_string_contains("Thread/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "methodResponses":[["Thread/get",{"accountId":"acct1","state":"s","notFound":[],"list":[{"id":"t1","emailIds":ids}]},"t0"]]
+            }))).with_priority(1).mount(&server).await;
+        let schema = Schema::new(EmailFirst, EmptyMutation, EmptySubscription);
+        let response = schema
+            .execute(request(
+                "{ loadedThread { total emails(first:1) { edges { cursor node { id } } } } }",
+                client_for(&server),
+                CardDavCreds::default(),
+            ))
+            .await;
+        assert_eq!(response.errors.len(), 1);
+        assert!(
+            response.errors[0]
+                .message
+                .contains("empty or duplicate email IDs")
+        );
+        assert!(
+            calls(&server)
+                .await
+                .iter()
+                .all(|call| call.method != "Email/get")
+        );
+    }
+}
+
+#[tokio::test]
 async fn lazy_thread_id_counts_and_page_metadata_do_not_load_members() {
     for (selection, thread_gets) in [
         ("id", 0),
