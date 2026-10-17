@@ -352,17 +352,10 @@ pub async fn run_server() -> anyhow::Result<()> {
 #[derive(serde::Deserialize)]
 struct HttpGraphqlRequest {
     query: String,
-    #[serde(default, deserialize_with = "present_variables")]
+    #[serde(default)]
     variables: Option<serde_json::Value>,
     #[serde(default, rename = "operationName")]
     operation_name: Option<String>,
-}
-
-fn present_variables<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Option<serde_json::Value>, D::Error> {
-    // Option's default deserializer conflates explicit null with omission.
-    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// The GraphiQL IDE uses locally embedded, lockfile-built assets.
@@ -456,7 +449,7 @@ fn graphql_variables(
     value: Option<serde_json::Value>,
 ) -> std::result::Result<async_graphql::Variables, String> {
     match value {
-        None => Ok(async_graphql::Variables::default()),
+        None | Some(serde_json::Value::Null) => Ok(async_graphql::Variables::default()),
         Some(value @ serde_json::Value::Object(_)) => {
             Ok(async_graphql::Variables::from_json(value))
         }

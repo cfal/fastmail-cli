@@ -230,7 +230,7 @@ async fn mcp_graphql_variables_require_an_object_and_reach_the_schema() {
     let mcp = FastmailMcp::build(Some("test-token".into()));
     for (variables, message) in [
         ("[]", "Variables must be a JSON object"),
-        ("null", "Variables must be a JSON object"),
+        ("false", "Variables must be a JSON object"),
         ("\"text\"", "Variables must be a JSON object"),
         ("{", "Invalid variables JSON:"),
     ] {
@@ -254,6 +254,19 @@ async fn mcp_graphql_variables_require_an_object_and_reach_the_schema() {
     let response: serde_json::Value = serde_json::from_str(&text_of(result)).unwrap();
     assert_eq!(response["data"]["__type"]["name"], "QueryRoot");
     assert!(response.get("errors").is_none());
+    for variables in [None, Some("null".into()), Some("{}".into())] {
+        let result = mcp
+            .graphql(Parameters(GraphqlRequest {
+                query: "query($name: String! = \"QueryRoot\") { __type(name: $name) { name } }"
+                    .into(),
+                variables,
+            }))
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&text_of(result)).unwrap();
+        assert_eq!(response["data"]["__type"]["name"], "QueryRoot");
+        assert!(response.get("errors").is_none());
+    }
 }
 
 #[tokio::test]
@@ -289,7 +302,6 @@ async fn invalid_http_variables_are_rejected_before_credentials_or_mutations() {
         serde_json::json!(false),
         serde_json::json!([]),
         serde_json::json!("text"),
-        serde_json::Value::Null,
     ] {
         let error = build_http_request(&mcp, HttpGraphqlRequest {
             query: "mutation($read: Boolean) { markAsRead(emailId: \"id\", read: $read) { success } }".into(),
@@ -314,7 +326,7 @@ async fn invalid_http_variables_are_rejected_before_credentials_or_mutations() {
 }
 
 #[tokio::test]
-async fn http_variables_distinguish_explicit_null_from_an_omitted_field() {
+async fn http_variables_reject_scalars_and_arrays() {
     let router = in_process_router(
         HttpSurfaces {
             graphql: true,
@@ -325,7 +337,7 @@ async fn http_variables_distinguish_explicit_null_from_an_omitted_field() {
     );
     for path in ["/graphql", "/graphql/stream"] {
         for variables in [
-            serde_json::Value::Null,
+            serde_json::json!("text"),
             serde_json::json!(false),
             serde_json::json!([]),
         ] {
@@ -365,6 +377,56 @@ async fn http_variables_distinguish_explicit_null_from_an_omitted_field() {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(body.get("errors").is_none(), "{body}");
         assert!(body["data"].is_object());
+    }
+}
+
+#[tokio::test]
+async fn http_null_variables_match_omission_and_preserve_defaults() {
+    let router = in_process_router(
+        HttpSurfaces {
+            graphql: true,
+            graphiql: false,
+            browser: false,
+        },
+        None,
+    );
+    for path in ["/graphql", "/graphql/stream"] {
+        for variables in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!({})),
+        ] {
+            let mut body = serde_json::json!({
+                "query":"query($name: String! = \"QueryRoot\") { __type(name: $name) { name } }"
+            });
+            if let Some(variables) = variables {
+                body["variables"] = variables;
+            }
+            let response = router
+                .clone()
+                .oneshot(request("POST", path, Body::from(body.to_string())))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            let data = if path.ends_with("/stream") {
+                assert!(text.contains("event: next\n"), "{text}");
+                assert!(text.contains("event: complete\n"), "{text}");
+                text.lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .unwrap()
+            } else {
+                text
+            };
+            let response: serde_json::Value = serde_json::from_str(data).unwrap();
+            assert_eq!(
+                response,
+                serde_json::json!({"data":{"__type":{"name":"QueryRoot"}}})
+            );
+        }
     }
 }
 
