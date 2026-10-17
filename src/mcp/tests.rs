@@ -314,6 +314,61 @@ async fn invalid_http_variables_are_rejected_before_credentials_or_mutations() {
 }
 
 #[tokio::test]
+async fn http_variables_distinguish_explicit_null_from_an_omitted_field() {
+    let router = in_process_router(
+        HttpSurfaces {
+            graphql: true,
+            graphiql: false,
+            browser: false,
+        },
+        None,
+    );
+    for path in ["/graphql", "/graphql/stream"] {
+        for variables in [
+            serde_json::Value::Null,
+            serde_json::json!(false),
+            serde_json::json!([]),
+        ] {
+            let body = serde_json::json!({
+                "query":"mutation($read: Boolean) { markAsRead(emailId: \"id\", read: $read) { success } }",
+                "variables":variables,
+            });
+            let response = router
+                .clone()
+                .oneshot(request("POST", path, Body::from(body.to_string())))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body["errors"][0]["message"],
+                "Variables must be a JSON object"
+            );
+        }
+    }
+    for body in [
+        serde_json::json!({"query":"{ __typename }"}),
+        serde_json::json!({"query":"query($name: String!) { __type(name:$name) { name } }", "variables":{"name":"QueryRoot"}}),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request("POST", "/graphql", Body::from(body.to_string())))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body.get("errors").is_none(), "{body}");
+        assert!(body["data"].is_object());
+    }
+}
+
+#[tokio::test]
 async fn http_auth_and_browser_policy_cover_every_surface() {
     let mut file = tempfile::NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut file, b"[users]\nalice = 'password'\nbob = 'second'").unwrap();
