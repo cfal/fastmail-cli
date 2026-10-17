@@ -320,7 +320,7 @@ pub async fn emails_connection(
     let limit = clamp_page(args.first.or(args.last).map(|n| n as u32));
     let backward = args.last.is_some();
     let client = ctx.data::<SharedClient>()?;
-    let client = client.lock().await;
+    let client = client.lock().await.clone();
     let query_args = |start, limit, calculate_total, fetch_summaries| EmailQuery {
         filter: jmap_filter.clone().unwrap_or_else(|| serde_json::json!({})),
         sort: jmap_sort.clone(),

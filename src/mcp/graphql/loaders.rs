@@ -9,6 +9,8 @@
 //! internal cache is therefore a per-request cache, which is what you want:
 //! asking for the same email twice in one query costs one fetch, and nothing is
 //! held across requests where it could go stale.
+//! Read loaders snapshot the authenticated client under its lock, then release
+//! the lock before I/O. Each snapshot retains the same account and runtime.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,7 +41,7 @@ impl Loader<String> for EmailLoader {
     type Error = LoadError;
 
     async fn load(&self, keys: &[String]) -> Result<HashMap<String, Email>, Self::Error> {
-        let client = self.0.lock().await;
+        let client = self.0.lock().await.clone();
         let emails = client.get_emails(keys).await.map_err(Arc::new)?;
         // Missing IDs are simply absent from the map — `load_one` then yields
         // `Ok(None)`, which resolvers surface as a null rather than an error.
@@ -101,7 +103,7 @@ impl Loader<String> for EmailSummaryLoader {
     type Error = LoadError;
 
     async fn load(&self, keys: &[String]) -> Result<HashMap<String, Arc<Email>>, Self::Error> {
-        let client = self.0.lock().await;
+        let client = self.0.lock().await.clone();
         Ok(client
             .get_email_summaries(keys)
             .await
@@ -150,7 +152,7 @@ impl Loader<()> for MailboxListLoader {
     type Error = LoadError;
 
     async fn load(&self, _keys: &[()]) -> Result<HashMap<(), Arc<Vec<Mailbox>>>, Self::Error> {
-        let client = self.0.lock().await;
+        let client = self.0.lock().await.clone();
         let mailboxes = client.fetch_mailboxes().await.map_err(Arc::new)?;
         Ok(HashMap::from([((), Arc::new(mailboxes))]))
     }
@@ -166,7 +168,7 @@ impl Loader<()> for IdentityListLoader {
     type Error = LoadError;
 
     async fn load(&self, _keys: &[()]) -> Result<HashMap<(), Arc<Vec<Identity>>>, Self::Error> {
-        let client = self.0.lock().await;
+        let client = self.0.lock().await.clone();
         let identities = client.list_identities().await.map_err(Arc::new)?;
         Ok(HashMap::from([((), Arc::new(identities))]))
     }
@@ -180,7 +182,7 @@ impl Loader<()> for MaskedEmailListLoader {
     type Error = LoadError;
 
     async fn load(&self, _keys: &[()]) -> Result<HashMap<(), Arc<Vec<MaskedEmail>>>, Self::Error> {
-        let client = self.0.lock().await;
+        let client = self.0.lock().await.clone();
         let masked = client.list_masked_emails().await.map_err(Arc::new)?;
         Ok(HashMap::from([((), Arc::new(masked))]))
     }
@@ -194,7 +196,7 @@ impl Loader<String> for ThreadLoader {
     type Error = LoadError;
 
     async fn load(&self, keys: &[String]) -> Result<HashMap<String, Vec<String>>, Self::Error> {
-        let client = self.0.lock().await;
+        let client = self.0.lock().await.clone();
         client.thread_email_ids(keys).await.map_err(Arc::new)
     }
 }
@@ -203,7 +205,7 @@ impl Loader<String> for ThreadLoader {
 ///
 /// Blob downloads are individual HTTP GETs — JMAP has no batch endpoint for
 /// them — so "batching" here means issuing the batch's downloads *concurrently*
-/// under a single client lock, rather than one at a time. Deduplication of
+/// from one authenticated client snapshot, rather than one at a time. Deduplication of
 /// repeated blob IDs within a batch is the other win.
 pub struct BlobLoader(SharedClient);
 
@@ -212,7 +214,7 @@ impl Loader<String> for BlobLoader {
     type Error = LoadError;
 
     async fn load(&self, keys: &[String]) -> Result<HashMap<String, Arc<Vec<u8>>>, Self::Error> {
-        let client = self.0.lock().await;
+        let client = self.0.lock().await.clone();
         let results = join_all(keys.iter().map(|id| client.download_blob(id))).await;
 
         let mut out = HashMap::with_capacity(keys.len());

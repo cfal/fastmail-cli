@@ -1,6 +1,114 @@
 use super::*;
 
 #[tokio::test]
+#[ignore = "synthetic delayed-read comparison; run explicitly with --ignored --nocapture"]
+async fn benchmark_shared_read_lock() {
+    use std::time::{Duration, Instant};
+    use wiremock::matchers::body_string_contains;
+    let server = mock_server(1).await;
+    for (name, tag, list) in [
+        ("Email/get", "g0", json!([email_json("e0", "t1", true)])),
+        ("Mailbox/get", "m0", json!([{"id":"mb1","name":"Inbox"}])),
+    ] {
+        Mock::given(body_string_contains(name))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(200))
+                .set_body_json(json!({"methodResponses":[[name,{"accountId":"acct1","state":"s","notFound":[],"list":list},tag]]})))
+            .with_priority(1).mount(&server).await;
+    }
+    let client = client_for(&server);
+    let start = Instant::now();
+    let (emails, mailboxes) = tokio::join!(
+        async { client.lock().await.get_emails(&["e0".into()]).await },
+        async { client.lock().await.fetch_mailboxes().await },
+    );
+    emails.unwrap();
+    mailboxes.unwrap();
+    let serialized = start.elapsed();
+    let start = Instant::now();
+    let (emails, mailboxes) = tokio::join!(
+        async {
+            let snapshot = client.lock().await.clone();
+            snapshot.get_emails(&["e0".into()]).await
+        },
+        async {
+            let snapshot = client.lock().await.clone();
+            snapshot.fetch_mailboxes().await
+        },
+    );
+    emails.unwrap();
+    mailboxes.unwrap();
+    eprintln!(
+        "two 200ms reads: shared lock {serialized:?}; account snapshots {:?}",
+        start.elapsed()
+    );
+    assert_eq!(calls(&server).await.len(), 4);
+}
+
+#[tokio::test]
+async fn independent_graphql_reads_overlap_without_holding_the_account_lock() {
+    use axum::{Json, Router, http::HeaderMap, routing::post};
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+    let router = Router::new().route("/jmap", post({
+        let release = release.clone();
+        move |headers: HeaderMap, Json(body): Json<Value>| {
+            let (release, started) = (release.clone(), started.clone());
+            async move {
+                let call = &body["methodCalls"][0];
+                assert_eq!(headers["authorization"], "Bearer test-token");
+                assert_eq!(call[1]["accountId"], "acct1");
+                started.send(()).unwrap();
+                release.acquire().await.unwrap().forget();
+                Json(json!({"methodResponses":[["Email/get",{"accountId":"acct1","state":"s","notFound":[],"list":[email_json("e0","t1",true)]},call[2]]]}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let api = format!(
+        "http://127.0.0.1:{}/jmap",
+        listener.local_addr().unwrap().port()
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = Arc::new(tokio::sync::Mutex::new(JmapClient::with_test_session(&api)));
+    let schema = build_schema();
+    let jobs: Vec<_> = (0..2)
+        .map(|_| {
+            let (schema, client) = (schema.clone(), client.clone());
+            tokio::spawn(async move {
+                schema
+                    .execute(request(
+                        "{ email(id:\"e0\") { id } }",
+                        client,
+                        CardDavCreds::default(),
+                    ))
+                    .await
+            })
+        })
+        .collect();
+    let both_started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        starts.recv().await.unwrap();
+        starts.recv().await.unwrap();
+    })
+    .await;
+    let unlocked = client.try_lock().is_ok();
+    release.add_permits(2);
+    for job in jobs {
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), job)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+    }
+    server.abort();
+    let _ = server.await;
+    assert!(
+        both_started.is_ok(),
+        "independent read requests were serialized"
+    );
+    assert!(unlocked, "network reads held the shared account lock");
+}
+
+#[tokio::test]
 async fn missing_emails_distinguish_nullable_lookups_from_required_records() {
     use wiremock::matchers::body_string_contains;
     let server = mock_server(0).await;
