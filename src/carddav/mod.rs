@@ -969,6 +969,11 @@ fn update_vcard(existing: &str, fields: &ContactFields<'_>) -> Result<String> {
 }
 
 fn complete_vcard_lines(existing: &str) -> Result<Vec<String>> {
+    if existing.starts_with(char::is_whitespace) {
+        return Err(Error::Server(
+            "Expected one complete vCard for update".into(),
+        ));
+    }
     validate_complete_vcard(&unfold_vcard(existing))?;
     // Keep untouched content lines, including their parameters, groups and folds.
     let mut lines: Vec<String> = Vec::new();

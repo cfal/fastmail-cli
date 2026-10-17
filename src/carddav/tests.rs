@@ -239,8 +239,12 @@ fn contact_updates_reject_incomplete_or_multiple_cards() {
         "BEGIN:OTHER\nFN:Name\nEND:VCARD\n",
         "BEGIN:VCARD\nFN:Name\n",
         "BEGIN:VCARD\nFN:Name\nEND:VCARD\nBEGIN:VCARD\nFN:Other\nEND:VCARD\n",
+        "\nBEGIN:VCARD\nFN:Name\nEND:VCARD\n",
+        "\r\nBEGIN:VCARD\r\nFN:Name\r\nEND:VCARD\r\n",
+        " BEGIN:VCARD\nFN:Name\nEND:VCARD\n",
+        "\tBEGIN:VCARD\nFN:Name\nEND:VCARD\n",
     ] {
-        assert!(update_vcard(original, &fields).is_err());
+        assert!(update_vcard(original, &fields).is_err(), "{original:?}");
     }
 }
 
