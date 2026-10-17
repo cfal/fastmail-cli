@@ -56,7 +56,7 @@ pub struct PageArgs {
 }
 
 impl PageArgs {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.first.is_some() && self.last.is_some() {
             return Err(async_graphql::Error::new(
                 "Pass `first` or `last`, not both.",
@@ -93,7 +93,7 @@ pub type ListConnection<T> = Connection<String, T, CountFields>;
 /// Work out which slice of an in-memory list a page refers to.
 ///
 /// Everything except `emails` arrives whole from one API call — JMAP has no
-/// windowed form for mailboxes, identities, a thread's messages or an email's
+/// windowed form for mailboxes, identities, a thread's member IDs or an email's
 /// attachments. So paging here is slicing, and the honest consequence is that a
 /// cursor is only as stable as the list: `after` names an item by id, and if
 /// that item is gone next time you get a "restart pagination" error rather than
@@ -194,6 +194,10 @@ pub fn paginate<T: OutputType>(
 /// the whole thread is already in hand.
 pub fn thread_connection(emails: Vec<GqlEmail>, args: PageArgs) -> Result<EmailConnection> {
     let page = page_of(emails, args, |e| e.email_id().to_string())?;
+    Ok(thread_page_connection(page))
+}
+
+pub(crate) fn thread_page_connection(page: Page<GqlEmail>) -> EmailConnection {
     let mut connection = Connection::with_additional_fields(
         page.has_previous,
         page.has_next,
@@ -208,7 +212,22 @@ pub fn thread_connection(emails: Vec<GqlEmail>, args: PageArgs) -> Result<EmailC
             .into_iter()
             .map(|(cursor, node)| Edge::new(cursor, node)),
     );
-    Ok(connection)
+    connection
+}
+
+pub(crate) fn wants_connection_nodes(ctx: &Context<'_>) -> bool {
+    ctx.look_ahead().field("edges").exists()
+        || ctx.look_ahead().field("nodes").exists()
+        || ctx
+            .look_ahead()
+            .field("pageInfo")
+            .field("startCursor")
+            .exists()
+        || ctx
+            .look_ahead()
+            .field("pageInfo")
+            .field("endCursor")
+            .exists()
 }
 
 /// Cost of a connection field for the complexity limit: the page size the
@@ -296,18 +315,7 @@ pub async fn emails_connection(
     // Selecting nothing but `totalCount` should not fetch a single email; and
     // `totalCount` is the only thing that makes the server compute the total.
     let wants_total = ctx.look_ahead().field("totalCount").exists();
-    let wants_nodes = ctx.look_ahead().field("edges").exists()
-        || ctx.look_ahead().field("nodes").exists()
-        || ctx
-            .look_ahead()
-            .field("pageInfo")
-            .field("startCursor")
-            .exists()
-        || ctx
-            .look_ahead()
-            .field("pageInfo")
-            .field("endCursor")
-            .exists();
+    let wants_nodes = wants_connection_nodes(ctx);
 
     let limit = clamp_page(args.first.or(args.last).map(|n| n as u32));
     let backward = args.last.is_some();

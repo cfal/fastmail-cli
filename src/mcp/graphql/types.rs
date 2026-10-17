@@ -16,11 +16,12 @@ use super::attachment_scope::{AttachmentScope, AttachmentScopes, base64_size, pr
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
 
 use super::connection::{
-    EmailConnection, ListConnection, PageArgs, emails_connection, page_complexity, paginate,
-    thread_connection,
+    EmailConnection, ListConnection, Page, PageArgs, emails_connection, page_complexity, page_of,
+    paginate, thread_page_connection,
 };
 use super::filter::{EmailFilter, EmailSort};
 use super::loaders::{Blobs, Mailboxes, Threads, load_emails, to_gql_error};
+use super::thread_view::ThreadView;
 use crate::carddav::{Contact, ContactEmail, ContactPhone};
 use crate::models::{
     BodyPreference, Email, EmailAddress, EmailHeader, Identity, Mailbox, MailboxRights,
@@ -395,8 +396,12 @@ impl GqlEmail {
 
     /// Wrap a list/search result. Body and attachment fields on it resolve lazily.
     pub fn summary(email: Email) -> Self {
+        Self::summary_shared(Arc::new(email))
+    }
+
+    pub(crate) fn summary_shared(email: Arc<Email>) -> Self {
         Self {
-            inner: Arc::new(email),
+            inner: email,
             complete: false,
         }
     }
@@ -584,11 +589,8 @@ impl GqlEmail {
 
     /// The conversation this email belongs to, with every message in it.
     #[graphql(complexity = "child_complexity.saturating_mul(10).min(super::MAX_COMPLEXITY + 1)")]
-    async fn thread(&self, ctx: &Context<'_>) -> Result<Option<GqlThread>> {
-        let Some(thread_id) = self.inner.thread_id.clone() else {
-            return Ok(None);
-        };
-        GqlThread::load(ctx, thread_id).await.map(Some)
+    async fn thread(&self) -> Option<ThreadView> {
+        self.inner.thread_id.clone().map(ThreadView::new)
     }
 }
 
@@ -1232,8 +1234,8 @@ impl GqlStatus {
     }
 }
 
-/// A conversation: every email sharing a thread ID, oldest first. Each email is
-/// fully fetched, so bodies and attachment metadata are already present.
+/// A conversation: every email sharing a thread ID, oldest first. Built-in
+/// resolvers load only selected pages; this public wrapper holds full records.
 pub struct GqlThread {
     pub id: Option<String>,
     pub emails: Vec<Email>,
@@ -1251,9 +1253,11 @@ impl GqlThread {
             .map_err(to_gql_error)?
             .unwrap_or_default();
 
-        let loaded = load_emails(ctx, ids).await?;
-        let mut emails: Vec<Email> = loaded.into_values().map(|e| (*e).clone()).collect();
-        emails.sort_by(|a, b| a.received_at.cmp(&b.received_at));
+        let loaded = load_emails(ctx, ids.clone()).await?;
+        let emails = ids
+            .iter()
+            .filter_map(|id| loaded.get(id).map(|email| (**email).clone()))
+            .collect();
 
         Ok(Self {
             id: Some(thread_id),
@@ -1270,9 +1274,8 @@ impl GqlThread {
 
     /// The conversation's messages, oldest first. Cursors are email IDs.
     ///
-    /// The whole thread is fetched in one batch regardless, so paging here
-    /// bounds what is *returned* rather than what is fetched — worth using on a
-    /// long thread where each node carries a body.
+    /// Built-in resolvers page ordered member IDs before loading summaries;
+    /// bodies and attachment metadata are fetched only for selected fields.
     #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn emails(
         &self,
@@ -1281,16 +1284,27 @@ impl GqlThread {
         first: Option<i32>,
         last: Option<i32>,
     ) -> Result<EmailConnection> {
-        let emails: Vec<GqlEmail> = self.emails.iter().cloned().map(GqlEmail::full).collect();
-        thread_connection(
-            emails,
+        let page = page_of(
+            self.emails.iter().collect(),
             PageArgs {
                 after,
                 before,
                 first,
                 last,
             },
-        )
+            |email| email.id.clone(),
+        )?;
+        Ok(thread_page_connection(Page {
+            items: page
+                .items
+                .into_iter()
+                .map(|(cursor, email)| (cursor, GqlEmail::full(email.clone())))
+                .collect(),
+            start: page.start,
+            total: page.total,
+            has_previous: page.has_previous,
+            has_next: page.has_next,
+        }))
     }
 
     /// Number of messages in the conversation.

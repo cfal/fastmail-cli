@@ -1141,6 +1141,13 @@ The naive shape — one detail call per email — would be 26. Loader caches are
 per request, so referencing the same email or mailbox twice in one query costs
 one fetch; nothing is retained between requests where it could go stale.
 
+Threads use JMAP's oldest-first member-ID order, including the server's stable
+ordering for equal timestamps. Selecting `thread { id }` needs no thread fetch;
+`total` and count-only connection selections fetch member IDs but no message
+bodies. Paging selects IDs before fetching summaries, and body fields load only
+the selected page. A member disappearing during the fetch returns an error
+asking you to restart pagination rather than silently shrinking the page.
+
 Attachment payloads permit 128 MiB of streamed input and 256 MiB of serialized
 strings per operation, with a 64 MiB per-blob limit, 1,024 distinct blob IDs and
 four concurrent downloads. Repeated aliases share bytes but each returned string

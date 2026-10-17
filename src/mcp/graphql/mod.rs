@@ -19,6 +19,7 @@ mod query;
 mod subscription;
 #[cfg(test)]
 mod tests;
+mod thread_view;
 pub mod types;
 pub(super) use input_limits::check_query;
 
@@ -127,6 +128,7 @@ pub fn request(query: &str, client: SharedClient, carddav: CardDavCreds) -> asyn
     async_graphql::Request::new(query)
         .data(attachment_scope::AttachmentScopes::default())
         .data(loaders::shared_emails(client.clone()))
+        .data(loaders::shared_summaries(client.clone()))
         .data(client)
         .data(carddav)
         .data(loaders.email)

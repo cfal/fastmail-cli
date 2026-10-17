@@ -68,6 +68,9 @@ impl SubscriptionRoot {
         if let Some(shared) = ctx.data_opt::<super::loaders::SharedEmails>() {
             shared.enable_all_cache(false);
         }
+        if let Some(summaries) = ctx.data_opt::<super::loaders::SharedSummaries>() {
+            summaries.enable_all_cache(false);
+        }
         ctx.data::<super::loaders::Mailboxes>()?
             .enable_all_cache(false);
         ctx.data::<super::loaders::Identities>()?

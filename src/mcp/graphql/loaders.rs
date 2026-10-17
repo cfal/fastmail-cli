@@ -94,6 +94,45 @@ pub(crate) async fn load_emails(
         .collect())
 }
 
+pub(crate) struct EmailSummaryLoader(SharedClient);
+
+impl Loader<String> for EmailSummaryLoader {
+    type Value = Arc<Email>;
+    type Error = LoadError;
+
+    async fn load(&self, keys: &[String]) -> Result<HashMap<String, Arc<Email>>, Self::Error> {
+        let client = self.0.lock().await;
+        Ok(client
+            .get_email_summaries(keys)
+            .await
+            .map_err(Arc::new)?
+            .into_iter()
+            .map(|email| (email.id.clone(), Arc::new(email)))
+            .collect())
+    }
+}
+
+pub(crate) type SharedSummaries = DataLoader<EmailSummaryLoader, HashMapCache>;
+
+pub(crate) fn shared_summaries(client: SharedClient) -> SharedSummaries {
+    SharedSummaries::with_cache(
+        EmailSummaryLoader(client),
+        tokio::spawn,
+        HashMapCache::default(),
+    )
+    .max_batch_size(EMAIL_BATCH)
+}
+
+pub(crate) async fn load_summaries(
+    ctx: &async_graphql::Context<'_>,
+    ids: Vec<String>,
+) -> async_graphql::Result<HashMap<String, Arc<Email>>> {
+    if let Some(loader) = ctx.data_opt::<SharedSummaries>() {
+        return loader.load_many(ids).await.map_err(to_gql_error);
+    }
+    load_emails(ctx, ids).await
+}
+
 /// Loads the account's whole mailbox list.
 ///
 /// JMAP offers no way to fetch mailboxes by id more cheaply than fetching the

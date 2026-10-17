@@ -145,19 +145,22 @@ impl QueryRoot {
             .map(GqlEmail::full_shared))
     }
 
-    /// Get all emails in a thread/conversation with full content. Returns emails sorted
-    /// oldest-first. Each email has full body and nested attachment access.
+    /// Get a conversation, oldest-first. Member summaries are loaded by page;
+    /// body and attachment fields resolve lazily.
     async fn thread(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Any email ID in the thread")] email_id: String,
-    ) -> Result<GqlThread> {
-        let email = require_email(ctx, &email_id).await?;
+    ) -> Result<super::thread_view::ThreadView> {
+        let email = super::loaders::load_summaries(ctx, vec![email_id.clone()])
+            .await?
+            .remove(&email_id)
+            .ok_or_else(|| async_graphql::Error::new(format!("Email {email_id} not found")))?;
         let thread_id = email
             .thread_id
             .clone()
             .ok_or_else(|| async_graphql::Error::new("Email has no thread ID"))?;
-        GqlThread::load(ctx, thread_id).await
+        Ok(super::thread_view::ThreadView::new(thread_id))
     }
 
     /// Search emails with flat filters.
