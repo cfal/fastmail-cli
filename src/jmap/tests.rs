@@ -1,5 +1,124 @@
 use super::*;
 
+#[tokio::test]
+async fn compose_and_spam_use_unique_system_roles_from_one_mailbox_snapshot() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for operation in ["send", "draft", "spam"] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let calls = body["methodCalls"].as_array().unwrap();
+            let responses: Vec<_> = calls.iter().map(|call| {
+                let data = match call[0].as_str().unwrap() {
+                    "Mailbox/get" => json!({"accountId":"acct1","state":"s1","notFound":[],"list":[
+                        {"id":"decoy-drafts","name":"Drafts","parentId":"parent"},
+                        {"id":"decoy-sent","name":"Sent"},
+                        {"id":"decoy-junk","name":"Junk"},
+                        {"id":"draft-role","name":"Entwurfe","role":"drafts"},
+                        {"id":"sent-role","name":"Envoyes","role":"sent"},
+                        {"id":"junk-role","name":"Courrier indesirable","role":"junk"}
+                    ]}),
+                    "Email/set" => json!({"accountId":"acct1","created":{"email":{"id":"e1"}},"updated":{"e1":null}}),
+                    "EmailSubmission/set" => json!({"accountId":"acct1","created":{"submission":{"id":"sub1"}}}),
+                    _ => panic!("Unexpected method: {}", call[0]),
+                };
+                json!([call[0],data,call[2]])
+            }).collect();
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":responses}))
+        }).expect(2).mount(&server).await;
+        let mut client = JmapClient::with_test_session(&server.uri());
+        if operation == "spam" {
+            client.mark_spam("e1").await.unwrap();
+        } else {
+            let identity =
+                serde_json::from_value(json!({"id":"i1","name":"Me","email":"me@example.test"}))
+                    .unwrap();
+            let context = client
+                .prepare_compose(None, operation == "draft", Some(Ok(identity)))
+                .await
+                .unwrap();
+            client
+                .create_and_submit_email(
+                    &context,
+                    EmailDraft {
+                        to: &[],
+                        cc: &[],
+                        bcc: &[],
+                        subject: "subject",
+                        body: "body",
+                        html_body: None,
+                        attachments: vec![],
+                        threading: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(first["methodCalls"][0][0], "Mailbox/get");
+        let write: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let calls = write["methodCalls"].as_array().unwrap();
+        if operation == "spam" {
+            assert_eq!(
+                calls[0][1]["update"]["e1"]["mailboxIds"],
+                json!({"junk-role":true})
+            );
+        } else {
+            assert_eq!(
+                calls[0][1]["create"]["email"]["mailboxIds"],
+                json!({"draft-role":true})
+            );
+            assert_eq!(calls.len(), if operation == "send" { 2 } else { 1 });
+            if operation == "send" {
+                assert_eq!(
+                    calls[1][1]["onSuccessUpdateEmail"]["#submission"]["mailboxIds"],
+                    json!({"sent-role":true})
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn internal_system_roles_refuse_missing_or_duplicate_roles_without_writes() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for role in ["drafts", "sent", "junk"] {
+        for duplicates in [false, true] {
+            let server = MockServer::start().await;
+            let mut list: Vec<_> = ["drafts", "sent", "junk"]
+                .into_iter()
+                .filter(|candidate| *candidate != role)
+                .map(|role| json!({"id":role,"name":role,"role":role}))
+                .collect();
+            list.push(json!({"id":"decoy","name":role}));
+            if duplicates {
+                list.extend([
+                    json!({"id":"a","name":"A","role":role}),
+                    json!({"id":"b","name":"B","role":role}),
+                ]);
+            }
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Mailbox/get", {"accountId":"acct1","state":"s1","notFound":[],"list":list}, "m0"
+            ]]}))).expect(1).mount(&server).await;
+            let mut client = JmapClient::with_test_session(&server.uri());
+            let error = if role == "junk" {
+                client.mark_spam("e1").await.unwrap_err()
+            } else {
+                client
+                    .prepare_compose(None, false, None)
+                    .await
+                    .err()
+                    .unwrap()
+            };
+            assert!(
+                matches!(error, Error::Config(_) | Error::MailboxNotFound(_)),
+                "{error}"
+            );
+        }
+    }
+}
+
 #[test]
 fn method_results_are_selected_by_method_call_and_account_without_conflicts() {
     let result = json!(["Email/set", {"accountId":"acct", "updated":{"e1":null}}, "update"]);

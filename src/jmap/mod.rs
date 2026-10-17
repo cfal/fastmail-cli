@@ -262,6 +262,21 @@ struct ComposeContext {
     draft: bool,
 }
 
+fn mailbox_by_role<'a>(mailboxes: &'a [Mailbox], role: &str) -> Result<&'a Mailbox> {
+    let mut matches = mailboxes
+        .iter()
+        .filter(|mailbox| mailbox.role.as_deref() == Some(role));
+    let mailbox = matches
+        .next()
+        .ok_or_else(|| Error::MailboxNotFound(role.into()))?;
+    if matches.next().is_some() {
+        return Err(Error::Config(format!(
+            "Multiple mailboxes have role {role}"
+        )));
+    }
+    Ok(mailbox)
+}
+
 impl ComposeContext {
     fn apply_to_email(&self, email_create: &mut HashMap<String, Value>) {
         email_create.insert(
@@ -1373,11 +1388,12 @@ impl JmapClient {
             self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
         }
         let account_id = self.account_id()?.to_string();
-        let mailbox = self.find_mailbox("drafts").await?;
+        let mailboxes = self.fetch_mailboxes().await?;
+        let mailbox = mailbox_by_role(&mailboxes, "drafts")?.clone();
         let sent_mailbox = if draft {
             None
         } else {
-            Some(self.find_mailbox("sent").await?)
+            Some(mailbox_by_role(&mailboxes, "sent")?.clone())
         };
         // Confirmation supplies its reviewed identity, including a failed lookup.
         let identity = match resolved_identity {
@@ -1572,7 +1588,8 @@ impl JmapClient {
 
     #[instrument(skip(self))]
     pub async fn mark_spam(&mut self, email_id: &str) -> Result<()> {
-        let junk = self.find_mailbox("junk").await?;
+        let mailboxes = self.fetch_mailboxes().await?;
+        let junk = mailbox_by_role(&mailboxes, "junk")?;
         self.move_email(email_id, &junk.id).await
     }
 

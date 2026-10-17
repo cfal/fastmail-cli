@@ -1,7 +1,7 @@
 use super::responses::{invalid, method_response, require_updated, submission_response};
-use super::{EMAIL_FULL_PROPERTIES, EMAIL_SUMMARY_PROPERTIES, JmapClient};
+use super::{EMAIL_FULL_PROPERTIES, EMAIL_SUMMARY_PROPERTIES, JmapClient, mailbox_by_role};
 use crate::error::{Error, Result};
-use crate::models::{Email, Identity, Mailbox};
+use crate::models::{Email, Identity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -33,21 +33,6 @@ impl DraftMailboxes {
     }
 }
 
-fn role_id(mailboxes: &[Mailbox], role: &str) -> Result<String> {
-    let mut matches = mailboxes
-        .iter()
-        .filter(|mailbox| mailbox.role.as_deref() == Some(role));
-    let mailbox = matches
-        .next()
-        .ok_or_else(|| Error::MailboxNotFound(role.into()))?;
-    if matches.next().is_some() {
-        return Err(Error::Config(format!(
-            "Multiple mailboxes have role {role}"
-        )));
-    }
-    Ok(mailbox.id.clone())
-}
-
 fn require_update(responses: &[Value], account: &str, id: &str, call_id: &str) -> Result<()> {
     let data = method_response(responses, "Email/set", call_id, account)?;
     require_updated(data, "Email/set", id)
@@ -58,9 +43,9 @@ impl JmapClient {
         self.require_capability("urn:ietf:params:jmap:submission", "Email sending")?;
         let mailboxes = self.fetch_mailboxes().await?;
         Ok(DraftMailboxes {
-            sent: role_id(&mailboxes, "sent")?,
-            drafts: role_id(&mailboxes, "drafts")?,
-            trash: role_id(&mailboxes, "trash")?,
+            sent: mailbox_by_role(&mailboxes, "sent")?.id.clone(),
+            drafts: mailbox_by_role(&mailboxes, "drafts")?.id.clone(),
+            trash: mailbox_by_role(&mailboxes, "trash")?.id.clone(),
         })
     }
 
@@ -148,7 +133,9 @@ impl JmapClient {
     }
 
     pub(crate) async fn discard_draft(&mut self, id: &str) -> Result<()> {
-        let trash = role_id(&self.fetch_mailboxes().await?, "trash")?;
+        let trash = mailbox_by_role(&self.fetch_mailboxes().await?, "trash")?
+            .id
+            .clone();
         let snapshot = self.draft_snapshot(id, false).await?;
         let account = self.account_id()?;
         let responses = self
