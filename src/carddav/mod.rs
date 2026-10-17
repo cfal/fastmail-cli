@@ -177,6 +177,10 @@ impl CardDavClient {
                 .contacts(serde_json::json!({"operation":"addressbooks"}))
                 .await;
         }
+        self.discover_addressbooks(false).await
+    }
+
+    async fn discover_addressbooks(&self, strict: bool) -> Result<Vec<AddressBook>> {
         let encoded_user = utf8_percent_encode(&self.username, PATH_SEGMENT);
         let url = format!("{}/dav/addressbooks/user/{}/", self.base_url, encoded_user);
 
@@ -210,16 +214,15 @@ impl CardDavClient {
             )));
         }
 
-        self.parse_addressbooks_response(&text)
+        self.parse_addressbooks_response(&text, strict)
     }
 
-    fn parse_addressbooks_response(&self, xml: &str) -> Result<Vec<AddressBook>> {
+    fn parse_addressbooks_response(&self, xml: &str, strict: bool) -> Result<Vec<AddressBook>> {
         let doc = roxmltree::Document::parse(xml)
             .map_err(|e| Error::Server(format!("Failed to parse XML: {e}")))?;
         require_multistatus(&doc)?;
 
         let dav_ns = "DAV:";
-        let carddav_ns = "urn:ietf:params:xml:ns:carddav";
         let mut addressbooks = Vec::new();
 
         for response in doc
@@ -227,43 +230,50 @@ impl CardDavClient {
             .children()
             .filter(|n| n.has_tag_name((dav_ns, "response")))
         {
-            let href = response
-                .children()
-                .find(|n| n.has_tag_name((dav_ns, "href")))
-                .and_then(|n| n.text())
-                .filter(|href| !href.is_empty())
-                .ok_or_else(|| {
-                    Error::Server("Incomplete CardDAV discovery: missing resource href".into())
-                })?;
-            self.resource_url(href)?;
-
-            // Check if this is an addressbook (has carddav:addressbook resourcetype)
-            let resource_type = required_dav_property(response, dav_ns, "resourcetype")?;
-            let is_addressbook = resource_type
-                .children()
-                .any(|n| n.has_tag_name((carddav_ns, "addressbook")));
-
-            if is_addressbook && !href.is_empty() {
-                let displayname = dav_property(response, dav_ns, "displayname");
-
-                let name = displayname.map(|s| s.to_string()).unwrap_or_else(|| {
-                    href.split('/')
-                        .rfind(|s| !s.is_empty())
-                        .unwrap_or("Unknown")
-                        .to_string()
-                });
-
-                // Skip the parent collection itself
-                if !href.ends_with(&format!("{}/", self.username)) {
-                    addressbooks.push(AddressBook {
-                        href: href.to_string(),
-                        name,
-                    });
-                }
+            match self.parse_addressbook_response(response) {
+                Ok(Some(book)) => addressbooks.push(book),
+                Ok(None) => {}
+                Err(error) if strict => return Err(error),
+                Err(error) => debug!(%error, "Skipping incomplete CardDAV address book"),
             }
         }
 
         Ok(addressbooks)
+    }
+
+    fn parse_addressbook_response(
+        &self,
+        response: roxmltree::Node<'_, '_>,
+    ) -> Result<Option<AddressBook>> {
+        let dav_ns = "DAV:";
+        let href = response
+            .children()
+            .find(|n| n.has_tag_name((dav_ns, "href")))
+            .and_then(|n| n.text())
+            .filter(|href| !href.is_empty())
+            .ok_or_else(|| {
+                Error::Server("Incomplete CardDAV discovery: missing resource href".into())
+            })?;
+        self.resource_url(href)?;
+        let resource_type = required_dav_property(response, dav_ns, "resourcetype")?;
+        let is_addressbook = resource_type
+            .children()
+            .any(|n| n.has_tag_name(("urn:ietf:params:xml:ns:carddav", "addressbook")));
+        if !is_addressbook || href.ends_with(&format!("{}/", self.username)) {
+            return Ok(None);
+        }
+        let name = dav_property(response, dav_ns, "displayname")
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                href.split('/')
+                    .rfind(|s| !s.is_empty())
+                    .unwrap_or("Unknown")
+                    .to_owned()
+            });
+        Ok(Some(AddressBook {
+            href: href.to_owned(),
+            name,
+        }))
     }
 
     /// List all contacts in an address book
@@ -382,7 +392,7 @@ impl CardDavClient {
 
     /// Get the first (default) address book href
     async fn default_addressbook(&self) -> Result<String> {
-        let addressbooks = self.list_addressbooks().await?;
+        let addressbooks = self.discover_addressbooks(true).await?;
         addressbooks
             .into_iter()
             .next()
@@ -391,7 +401,7 @@ impl CardDavClient {
     }
 
     async fn find_contact_href(&self, contact_id: &str) -> Result<Option<ContactResource>> {
-        let addressbooks = self.list_addressbooks().await?;
+        let addressbooks = self.discover_addressbooks(true).await?;
         let mut found = None;
 
         for ab in addressbooks {
@@ -427,7 +437,7 @@ impl CardDavClient {
                     .ok_or_else(|| {
                         Error::Server("Incomplete CardDAV discovery: missing resource href".into())
                     })?;
-                self.resource_url(href)?;
+                let url = self.resource_url(href)?;
 
                 let vcard_data = required_dav_property(response, carddav_ns, "address-data")?
                     .text()
@@ -435,22 +445,32 @@ impl CardDavClient {
                     .ok_or_else(|| {
                         Error::Server("Incomplete CardDAV discovery: empty address-data".into())
                     })?;
-                let lines = complete_vcard_lines(vcard_data)?;
-                if lines
-                    .iter()
+                let unfolded = unfold_vcard(vcard_data);
+                validate_complete_vcard(&unfolded)?;
+                if unfolded
+                    .lines()
+                    .map(str::trim)
                     .filter(|line| property_name(line).eq_ignore_ascii_case("UID"))
                     .count()
                     > 1
-                    || lines.iter().any(|line| !line.contains(':'))
+                    || unfolded.lines().any(|line| !line.contains(':'))
                 {
                     return Err(Error::Server(
                         "Incomplete CardDAV discovery: malformed contact identity".into(),
                     ));
                 }
-                let contact = self.contact_at(vcard_data, href).ok_or_else(|| {
-                    Error::Server("Incomplete CardDAV discovery: malformed contact".into())
-                })?;
-                if contact.id == contact_id {
+                let contact = parse_vcard_fields(&unfolded);
+                let id = if contact.id.is_empty() {
+                    format!("href:{}", URL_SAFE_NO_PAD.encode(url.as_str()))
+                } else {
+                    contact.id
+                };
+                if id == contact_id {
+                    if contact.name.is_empty() {
+                        return Err(Error::Server(format!(
+                            "Incomplete CardDAV discovery: contact at {href} has no name"
+                        )));
+                    }
                     if found.is_some() {
                         return Err(Error::Server(
                             "Contact ID matches multiple resources; refusing an ambiguous mutation"
@@ -825,7 +845,11 @@ fn vcard_label(label: Option<&str>) -> String {
 
 /// Parse a vCard string into a Contact
 fn parse_vcard(vcard_str: &str) -> Option<Contact> {
-    let unfolded = unfold_vcard(vcard_str);
+    let contact = parse_vcard_fields(&unfold_vcard(vcard_str));
+    (!contact.name.is_empty()).then_some(contact)
+}
+
+fn parse_vcard_fields(unfolded: &str) -> Contact {
     let mut id = String::new();
     let mut name = String::new();
     let mut emails = Vec::new();
@@ -877,12 +901,7 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
         }
     }
 
-    // Need at least a name
-    if name.is_empty() {
-        return None;
-    }
-
-    Some(Contact {
+    Contact {
         id,
         name,
         emails,
@@ -890,7 +909,7 @@ fn parse_vcard(vcard_str: &str) -> Option<Contact> {
         organization,
         title,
         notes,
-    })
+    }
 }
 
 fn property_name(line: &str) -> &str {
@@ -931,7 +950,9 @@ fn update_vcard(existing: &str, fields: &ContactFields<'_>) -> Result<String> {
     let lines = complete_vcard_lines(existing)?;
     let mut result = String::new();
     for line in lines {
-        if line.trim_end().eq_ignore_ascii_case("END:VCARD") {
+        let unfolded = unfold_vcard(&line);
+        let logical_line = unfolded.trim();
+        if logical_line.eq_ignore_ascii_case("END:VCARD") {
             for replacement in replacements
                 .lines()
                 .filter(|line| changed(property_name(line)))
@@ -940,7 +961,7 @@ fn update_vcard(existing: &str, fields: &ContactFields<'_>) -> Result<String> {
                 result.push_str("\r\n");
             }
         }
-        if !changed(property_name(&line)) {
+        if !changed(property_name(logical_line)) {
             result.push_str(&line);
         }
     }
@@ -948,6 +969,7 @@ fn update_vcard(existing: &str, fields: &ContactFields<'_>) -> Result<String> {
 }
 
 fn complete_vcard_lines(existing: &str) -> Result<Vec<String>> {
+    validate_complete_vcard(&unfold_vcard(existing))?;
     // Keep untouched content lines, including their parameters, groups and folds.
     let mut lines: Vec<String> = Vec::new();
     for line in existing.split_inclusive('\n') {
@@ -957,19 +979,25 @@ fn complete_vcard_lines(existing: &str) -> Result<Vec<String>> {
             lines.push(line.to_owned());
         }
     }
+    Ok(lines)
+}
+
+fn validate_complete_vcard(unfolded: &str) -> Result<()> {
+    let lines = unfolded.lines().map(str::trim);
     if !lines
-        .first()
-        .is_some_and(|line| line.trim_end().eq_ignore_ascii_case("BEGIN:VCARD"))
+        .clone()
+        .next()
+        .is_some_and(|line| line.eq_ignore_ascii_case("BEGIN:VCARD"))
         || !lines
-            .last()
-            .is_some_and(|line| line.trim_end().eq_ignore_ascii_case("END:VCARD"))
+            .clone()
+            .next_back()
+            .is_some_and(|line| line.eq_ignore_ascii_case("END:VCARD"))
         || lines
-            .iter()
+            .clone()
             .filter(|line| property_name(line).eq_ignore_ascii_case("BEGIN"))
             .count()
             != 1
         || lines
-            .iter()
             .filter(|line| property_name(line).eq_ignore_ascii_case("END"))
             .count()
             != 1
@@ -978,7 +1006,7 @@ fn complete_vcard_lines(existing: &str) -> Result<Vec<String>> {
             "Expected one complete vCard for update".into(),
         ));
     }
-    Ok(lines)
+    Ok(())
 }
 
 /// Generate a UID for new contacts.

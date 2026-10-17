@@ -244,6 +244,26 @@ fn contact_updates_reject_incomplete_or_multiple_cards() {
     }
 }
 
+#[test]
+fn contact_updates_recognize_folded_names_and_preserve_untouched_lines() {
+    let original = "BE\r\n GIN:VCARD\r\nU\r\n ID:contact\r\nF\r\n N:Old\r\nX-CUSTOM:one\r\n two\r\nEN\r\n D:VCARD\r\n";
+    let updated = update_vcard(
+        original,
+        &ContactFields {
+            name: Some("New"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(updated.starts_with("BE\r\n GIN:VCARD\r\nU\r\n ID:contact\r\n"));
+    assert!(updated.contains("X-CUSTOM:one\r\n two\r\n"));
+    assert!(updated.ends_with("FN:New\r\nN:New;;;;\r\nEN\r\n D:VCARD\r\n"));
+    assert!(!updated.contains("Old"));
+    let contact = parse_vcard(&updated).unwrap();
+    assert_eq!(contact.id, "contact");
+    assert_eq!(contact.name, "New");
+}
+
 async fn contact_server(vcard: &str, etag: &str) -> (CardDavClient, wiremock::MockServer) {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
     let server = MockServer::start().await;
@@ -383,6 +403,23 @@ async fn partial_multistatus_discovery_never_authorizes_a_contact_mutation() {
             .with_priority(1)
             .mount(&server)
             .await;
+        if verb == "PROPFIND" {
+            let books = client.list_addressbooks().await.unwrap();
+            assert_eq!(books.len(), 1);
+            assert_eq!(books[0].href, "/books/");
+            let contacts = client.search_contacts("Name").await.unwrap();
+            assert_eq!(contacts.len(), 1);
+            assert_eq!(contacts[0].id, "contact");
+            assert!(
+                client
+                    .create_contact(&ContactFields {
+                        name: Some("Created"),
+                        ..Default::default()
+                    })
+                    .await
+                    .is_err()
+            );
+        }
         assert!(
             client
                 .update_contact(
@@ -408,6 +445,84 @@ async fn partial_multistatus_discovery_never_authorizes_a_contact_mutation() {
                 .iter()
                 .all(|request| request.method != "PUT" && request.method != "DELETE")
         );
+    }
+}
+
+#[tokio::test]
+async fn folded_ambiguous_contact_identities_never_authorize_mutations() {
+    use wiremock::{Mock, ResponseTemplate, matchers::method};
+    for properties in [
+        "UID:other\r\nU\r\n ID:contact\r\n",
+        "UID:other\r\nitem1.U\r\n\tID:contact\r\n",
+        "UID:contact\r\nE\r\n ND:VCARD\r\nBE\r\n GIN:VCARD\r\n",
+    ] {
+        let card = format!("BEGIN:VCARD\r\n{properties}FN:Name\r\nEND:VCARD\r\n");
+        let (client, server) = contact_server(&card, "\"v1\"").await;
+        for verb in ["PUT", "DELETE"] {
+            Mock::given(method(verb))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(0)
+                .mount(&server)
+                .await;
+        }
+        assert!(
+            client
+                .update_contact(
+                    "contact",
+                    &ContactFields {
+                        title: Some("Changed"),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .is_err(),
+            "{card}"
+        );
+        assert!(client.delete_contact("contact").await.is_err(), "{card}");
+    }
+}
+
+#[tokio::test]
+async fn unrelated_nameless_contacts_do_not_block_mutations() {
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+    let contact = "BEGIN:VCARD\nUID:contact\nFN:Name\nEND:VCARD\n";
+    for properties in ["UID:other\n", "UID:other\nFN:\n", "", "U\n ID:other\n"] {
+        let (client, server) = contact_server(contact, "\"v1\"").await;
+        let nameless = format!("BEGIN:VCARD\n{properties}END:VCARD\n");
+        Mock::given(method("REPORT"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(format!(
+                r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+                <d:response><d:href>/books/contact.vcf</d:href><d:propstat><d:prop><d:getetag>"v1"</d:getetag><c:address-data>{contact}</c:address-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+                <d:response><d:href>/books/other.vcf</d:href><d:propstat><d:prop><c:address-data>{nameless}</c:address-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+                </d:multistatus>"#
+            )))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        for verb in ["PUT", "DELETE"] {
+            Mock::given(method(verb))
+                .and(path("/books/contact.vcf"))
+                .and(header("If-Match", "\"v1\""))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let updated = client
+            .update_contact(
+                "contact",
+                &ContactFields {
+                    title: Some("Changed"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.id, "contact");
+        client.delete_contact("contact").await.unwrap();
     }
 }
 
