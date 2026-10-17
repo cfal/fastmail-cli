@@ -179,6 +179,44 @@ fn method_results_are_selected_by_method_call_and_account_without_conflicts() {
 }
 
 #[test]
+fn method_response_validation_preserves_error_precedence() {
+    let result = json!(["Email/get", {"accountId":"acct"}, "get"]);
+    let wrong_account = json!(["Email/get", {"accountId":"other"}, "get"]);
+    let malformed = json!(["Mailbox/get", {}, "other", "extra"]);
+    for (values, expected) in [
+        (json!([wrong_account]), "Account mismatch"),
+        (
+            json!([wrong_account, result]),
+            "Conflicting method responses",
+        ),
+        (
+            json!([result, malformed, result]),
+            "Malformed method response",
+        ),
+        (
+            json!([result, result, malformed]),
+            "Conflicting method responses",
+        ),
+        (json!([malformed, result]), "Malformed method response"),
+    ] {
+        let error =
+            responses::method_response(values.as_array().unwrap(), "Email/get", "get", "acct")
+                .unwrap_err();
+        let Error::Jmap {
+            method,
+            error_type,
+            description,
+        } = error
+        else {
+            panic!("unexpected error: {error}");
+        };
+        assert_eq!(method, "Email/get");
+        assert_eq!(error_type, "parse");
+        assert_eq!(description, expected, "{values}");
+    }
+}
+
+#[test]
 fn compose_requires_submission_evidence_but_never_undoes_accepted_delivery() {
     let creation = json!(["Email/set", {"accountId":"acct","created":{"email":{"id":"e1"}}}, "e0"]);
     let submitted = json!(["EmailSubmission/set", {"accountId":"acct","created":{"submission":{"id":"sub1"}}}, "s0"]);

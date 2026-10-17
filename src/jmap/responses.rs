@@ -25,7 +25,7 @@ fn tuple(value: &Value) -> Option<(&str, &Value, &str)> {
 }
 
 pub(super) fn method_response<'a>(
-    responses: &'a [Value],
+    responses: impl IntoIterator<Item = &'a Value>,
     method: &str,
     call_id: &str,
     account: &str,
@@ -34,12 +34,13 @@ pub(super) fn method_response<'a>(
     for response in responses {
         let (name, data, id) =
             tuple(response).ok_or_else(|| invalid(method, "Malformed method response"))?;
-        if id == call_id
-            && (name == method || name == "error")
-            && selected.replace((name, data)).is_some()
-        {
+        if id != call_id || (name != method && name != "error") {
+            continue;
+        }
+        if selected.is_some() {
             return Err(invalid(method, "Conflicting method responses"));
         }
+        selected = Some((name, data));
     }
     match selected {
         Some(("error", data)) => Err(method_error(method, data, "No description")),
@@ -114,16 +115,16 @@ fn map_entry<'a>(
     }
 }
 
-fn positive<'a>(
+fn write_evidence<'a>(
     data: &'a Value,
     method: &str,
     key: &str,
-    yes: &str,
-    no: &str,
+    success_field: &str,
+    failure_field: &str,
 ) -> Result<&'a Value> {
     match (
-        map_entry(data, yes, key, method)?,
-        map_entry(data, no, key, method)?,
+        map_entry(data, success_field, key, method)?,
+        map_entry(data, failure_field, key, method)?,
     ) {
         (Some(_), Some(_)) => Err(invalid(method, "Conflicting success and failure evidence")),
         (None, Some(error)) => Err(method_error(method, error, "Write failed")),
@@ -133,7 +134,7 @@ fn positive<'a>(
 }
 
 pub(super) fn require_created_id(data: &Value, method: &str, key: &str) -> Result<String> {
-    positive(data, method, key, "created", "notCreated")?["id"]
+    write_evidence(data, method, key, "created", "notCreated")?["id"]
         .as_str()
         .filter(|id| !id.is_empty())
         .map(str::to_owned)
@@ -141,7 +142,7 @@ pub(super) fn require_created_id(data: &Value, method: &str, key: &str) -> Resul
 }
 
 pub(super) fn require_updated(data: &Value, method: &str, id: &str) -> Result<()> {
-    let value = positive(data, method, id, "updated", "notUpdated")?;
+    let value = write_evidence(data, method, id, "updated", "notUpdated")?;
     if value.is_null() || value.is_object() {
         Ok(())
     } else {
@@ -156,25 +157,18 @@ pub(super) fn submission_response(
     email_id: &str,
 ) -> Result<(String, Option<String>)> {
     let method = "EmailSubmission/set";
-    let primary: Vec<_> = responses
+    let (primary, filing): (Vec<_>, Vec<_>) = responses
         .iter()
-        .filter(|value| value[0] == method && value[2] == call_id)
-        .cloned()
-        .collect();
+        .partition(|value| value[0] == method && value[2] == call_id);
     if primary.is_empty() {
         method_response(responses, method, call_id, account)?;
         return Err(invalid(method, "Missing submission response"));
     }
     // A same-call-ID error may describe implicit filing, but only after positive
     // submission evidence. Never turn accepted delivery into a retryable failure.
-    let data = method_response(&primary, method, call_id, account)?;
+    let data = method_response(primary, method, call_id, account)?;
     let id = require_created_id(data, method, "submission")?;
-    let filing: Vec<_> = responses
-        .iter()
-        .filter(|value| !(value[0] == method && value[2] == call_id))
-        .cloned()
-        .collect();
-    let warning = method_response(&filing, "Email/set", call_id, account)
+    let warning = method_response(filing, "Email/set", call_id, account)
         .and_then(|data| require_updated(data, "Email/set", email_id))
         .err()
         .map(|error| format!(

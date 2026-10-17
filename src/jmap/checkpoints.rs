@@ -2,7 +2,7 @@ use super::responses::invalid as invalid_response;
 use super::{CHANGES_PAGE, JmapClient};
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashSet;
 use tracing::instrument;
 
@@ -65,30 +65,7 @@ impl JmapClient {
             ])])
             .await?;
 
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct StateResponse {
-            account_id: String,
-            state: String,
-            list: Vec<Value>,
-            not_found: Vec<String>,
-        }
-
-        let response: StateResponse =
-            super::responses::get(&responses, "Email/get", "s0", account_id, Some(&[]))?;
-        if response.account_id != account_id
-            || !response.list.is_empty()
-            || !response.not_found.is_empty()
-        {
-            return Err(invalid_response(
-                "Email/get",
-                "Unexpected account or nonempty ID result",
-            ));
-        }
-        Ok(EmailCheckpoint {
-            account_id: response.account_id,
-            state: response.state,
-        })
+        super::responses::get(&responses, "Email/get", "s0", account_id, Some(&[]))
     }
 
     /// Immediately collect all `Email/changes` pages from an opaque saved state.

@@ -1394,12 +1394,8 @@ impl JmapClient {
         account: &str,
         submitted: bool,
     ) -> Result<String> {
-        let creation: Vec<_> = responses
-            .iter()
-            .filter(|value| value[2] != "s0")
-            .cloned()
-            .collect();
-        let email = responses::method_response(&creation, "Email/set", "e0", account)
+        let creation = responses.iter().filter(|value| value[2] != "s0");
+        let email = responses::method_response(creation, "Email/set", "e0", account)
             .and_then(|data| responses::require_created_id(data, "Email/set", "email"));
         if !submitted {
             return email;

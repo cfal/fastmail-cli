@@ -1,9 +1,9 @@
-use super::responses::{invalid, method_response, require_updated, submission_response};
+use super::responses::{invalid, method_response, parse, require_updated, submission_response};
 use super::{EMAIL_FULL_PROPERTIES, EMAIL_SUMMARY_PROPERTIES, JmapClient, mailbox_by_role};
 use crate::error::{Error, Result};
 use crate::models::{Email, Identity};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 pub(crate) struct DraftSnapshot {
     pub email: Email,
@@ -31,11 +31,6 @@ impl DraftMailboxes {
         }
         Ok(())
     }
-}
-
-fn require_update(responses: &[Value], account: &str, id: &str, call_id: &str) -> Result<()> {
-    let data = method_response(responses, "Email/set", call_id, account)?;
-    require_updated(data, "Email/set", id)
 }
 
 impl JmapClient {
@@ -69,18 +64,11 @@ impl JmapClient {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Snapshot {
-            account_id: String,
             state: String,
             list: Vec<Email>,
             not_found: Vec<String>,
         }
-        let data: Snapshot = serde_json::from_value(
-            method_response(&responses, "Email/get", "draft", account)?.clone(),
-        )
-        .map_err(|error| invalid("Email/get", &error.to_string()))?;
-        if data.account_id != account {
-            return Err(invalid("Email/get", "Account mismatch"));
-        }
+        let data: Snapshot = parse(&responses, "Email/get", "draft", account)?;
         if data.list.is_empty() && data.not_found == [id] {
             return Err(Error::EmailNotFound(id.into()));
         }
@@ -146,6 +134,7 @@ impl JmapClient {
                 }, "discardDraft"
             ])])
             .await?;
-        require_update(&responses, account, id, "discardDraft")
+        let data = method_response(&responses, "Email/set", "discardDraft", account)?;
+        require_updated(data, "Email/set", id)
     }
 }
