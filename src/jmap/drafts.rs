@@ -104,14 +104,21 @@ impl JmapClient {
 
     pub(crate) async fn draft_snapshot(&self, id: &str, full: bool) -> Result<DraftSnapshot> {
         let account = self.account_id()?;
-        let responses = self.request(vec![json!([
-            "Email/get", {
-                "accountId": account, "ids": [id],
-                "properties": if full { EMAIL_FULL_PROPERTIES } else { EMAIL_SUMMARY_PROPERTIES },
-                "fetchTextBodyValues": full, "fetchHTMLBodyValues": full,
-                "maxBodyValueBytes": 1024 * 1024
-            }, "draft"
-        ])]).await?;
+        let properties = if full {
+            EMAIL_FULL_PROPERTIES
+        } else {
+            EMAIL_SUMMARY_PROPERTIES
+        };
+        let responses = self
+            .request(vec![json!([
+                "Email/get", {
+                    "accountId": account, "ids": [id],
+                    "properties": properties,
+                    "fetchTextBodyValues": full, "fetchHTMLBodyValues": full,
+                    "maxBodyValueBytes": 1024 * 1024
+                }, "draft"
+            ])])
+            .await?;
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Snapshot {
@@ -190,8 +197,12 @@ impl JmapClient {
             .to_owned();
         // An implicit Email/set can fail after submission succeeds. Never hide
         // that success or encourage sending the same message a second time.
-        let filing_warning = require_update(&responses, account, &draft.id, "submitDraft")
-            .err().map(|error| format!("Submitted, but filing in Sent is unconfirmed: {error}. Do not resend; inspect the email's mailboxes."));
+        let filing_warning = match require_update(&responses, account, &draft.id, "submitDraft") {
+            Ok(()) => None,
+            Err(error) => Some(format!(
+                "Submitted, but filing in Sent is unconfirmed: {error}. Do not resend; inspect the email's mailboxes."
+            )),
+        };
         Ok(DraftSubmission { id, filing_warning })
     }
 
