@@ -63,7 +63,8 @@ Neither operation permanently deletes or replaces message content.
 ## Resource Limits
 
 HTTP JSON requests are limited to 2 MiB; attachment uploads and buffered upstream
-responses to 64 MiB. Image decoding is limited to 16,384 pixels per dimension
+responses to 64 MiB. Local `--html-file` input is also limited to 64 MiB by a
+bounded read. Image decoding is limited to 16,384 pixels per dimension
 and a 128 MiB allocation budget. Image conversion rejects budgets below 512 bytes
 and stops after at most four resize passes, reusing reduced images. SSE frames are
 limited to 1 MiB. GraphQL has a

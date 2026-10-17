@@ -307,8 +307,9 @@ the cursor has to resync, are reported on stderr; stdout stays pure NDJSON.
 
 Watch keeps its cursor only in memory and starts at the current state after a
 process restart. Use the commands below when downtime must be reconciled from
-a caller-owned checkpoint. Existing watch and GraphQL subscription behavior is
-unchanged; neither accepts a saved Email state.
+a caller-owned checkpoint. Neither watch nor GraphQL subscriptions accept a
+saved Email state. A GraphQL subscription reports expired history as a
+resync-required error and closes; query for missed mail before reconnecting.
 
 ### Caller-Managed Email Checkpoints
 
@@ -1146,6 +1147,8 @@ result and pass it to CONFIRM after approval. Tokens expire after 15 minutes and
 cannot be reused, transferred to another account, or applied to a different email.
 
 One subscription, `emails`, streams arrivals over the same machinery as `fastmail watch`.
+If upstream change history expires, it reports a resync-required error and ends
+instead of silently continuing across missing arrivals.
 
 Token can be set via `FASTMAIL_API_TOKEN` env var or config file.
 
