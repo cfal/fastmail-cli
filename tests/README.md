@@ -30,7 +30,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .github/scripts -p 'te
 - `tests/config.rs`: real configuration getters and persistence in child processes with isolated homes and environment variables.
 - `tests/http_cli.rs`: executable-level output, exit status, remote transport, domain senders and names across compose operations, downloads, and destructive-command confirmation. Checkpoint tests exercise immediate restart catch-up, replay after failed fetches, no partial output, and structured resync failures.
 - `src/main.rs`: Clap argument-definition consistency and literal help text.
-- `tests/extraction.rs`: generated document fixtures for supported extraction formats.
+- `tests/extraction.rs`: best-effort CLI extraction coverage. Shared generated fixtures in `tests/support/extraction.rs` also exercise the bounded GraphQL extraction path from `src/util.rs`, including DOCX, XLSX, PDF, HTML, XML, EML, RTF and plain text.
 - `web/fetcher.test.js`: GraphiQL HTTP/SSE routing, cancellation, per-request headers, and failure propagation.
 - `.github/scripts/test_release_version.py`: release ordering, paginated GitHub results, workflow outputs, and fail-closed lookup behavior. GitHub calls are mocked.
 - `.github/scripts/test_lru_guard.py`: the dependency-policy source guard, including forbidden references, search errors, and missing Git.

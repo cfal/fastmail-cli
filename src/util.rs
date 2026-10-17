@@ -2,6 +2,10 @@ use crate::jmap::AttachmentData;
 use crate::models::EmailAddress;
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "../tests/support/extraction.rs"]
+mod extraction_fixtures;
+
 struct RuntimeHttpClient {
     runtime: tokio::runtime::Id,
     client: reqwest::Client,
@@ -197,7 +201,7 @@ pub(crate) async fn extract_text_bounded(
         }),
         ..Default::default()
     };
-    let input = ExtractInput::from_bytes(bytes.to_vec(), &mime_from_filename(filename), None);
+    let input = ExtractInput::from_bytes(bytes.to_vec(), mime_from_filename(filename), None);
     match extract(input, &config).await {
         Ok(result) => join_extracted_text(
             result.results.iter().map(|result| result.content.as_str()),
@@ -206,7 +210,7 @@ pub(crate) async fn extract_text_bounded(
         Err(
             error @ (XbergError::Security { .. }
             | XbergError::Timeout { .. }
-            | XbergError::Cancelled { .. }
+            | XbergError::Cancelled
             | XbergError::Validation { .. }),
         ) => Err(error.into()),
         Err(error) => {
@@ -931,6 +935,27 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_graphql_extraction_preserves_supported_document_formats() {
+        let documents = extraction_fixtures::office_documents()
+            .into_iter()
+            .chain(std::iter::once((
+                "test.pdf",
+                extraction_fixtures::simple_pdf(),
+            )))
+            .chain(
+                extraction_fixtures::text_documents()
+                    .map(|(name, text)| (name, text.as_bytes().to_vec())),
+            );
+        for (name, bytes) in documents {
+            let text = extract_text_bounded(&bytes, name, MAX_ATTACHMENT_BYTES)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+                .unwrap_or_else(|| panic!("{name}: no extracted content"));
+            assert!(text.contains("Hello attachment"), "{name}: {text}");
+        }
     }
 
     #[test]
