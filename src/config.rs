@@ -77,8 +77,7 @@ impl Config {
         // Write to a sibling temp file with 0o600, then rename atomically over
         // the target. This closes the TOCTOU window between writing the token
         // and tightening permissions.
-        let tmp_path = path.with_extension("toml.tmp");
-        let _ = fs::remove_file(&tmp_path);
+        let tmp_path = dir.join(format!("config.{}.tmp", uuid::Uuid::new_v4()));
         write_private_file(&tmp_path, content.as_bytes()).inspect_err(|_| {
             let _ = fs::remove_file(&tmp_path);
         })?;

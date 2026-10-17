@@ -166,6 +166,49 @@ fn save_replaces_existing_config_and_removes_the_temporary_file() {
     );
 }
 
+#[test]
+fn overlapping_saves_own_their_temporary_files() {
+    isolated("overlapping_saves_own_their_temporary_files", &[], || {
+        saved_config();
+        let foreign = config_path().with_extension("toml.tmp");
+        std::fs::write(&foreign, "another writer").unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let mut config = Config::default();
+                    config.set_token(format!("{index}:{}", "token".repeat(10_000)));
+                    barrier.wait();
+                    config.save().unwrap();
+                });
+            }
+        });
+        let token = Config::load().unwrap().get_token().unwrap();
+        assert!((0..8).any(|index| token == format!("{index}:{}", "token".repeat(10_000))));
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "another writer");
+        let files = std::fs::read_dir(config_path().parent().unwrap())
+            .unwrap()
+            .count();
+        assert_eq!(
+            files, 2,
+            "only the config and foreign temporary file remain"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(config_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn save_tightens_existing_permissions_and_refuses_symlink_targets() {
