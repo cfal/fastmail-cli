@@ -310,7 +310,17 @@ impl EmailFilter {
 
         for (key, group) in [("OR", &self.or), ("NOT", &self.not)] {
             let Some(group) = group else { continue };
-            let nested: Vec<Value> = group.iter().filter_map(|c| c.to_jmap(mailboxes)).collect();
+            // An empty condition matches everything; dropping it changes OR/NOT.
+            let mut nested = Vec::new();
+            let mut matches_all = false;
+            for child in group {
+                let child = child.to_jmap(mailboxes);
+                matches_all |= child.is_none();
+                nested.push(child.unwrap_or_else(|| json!({})));
+            }
+            if key == "OR" && matches_all {
+                continue;
+            }
             if !nested.is_empty() {
                 conditions.push(json!({ "operator": key, "conditions": nested }));
             }
@@ -351,6 +361,31 @@ mod tests {
     #[test]
     fn empty_filter_constrains_nothing() {
         assert_eq!(EmailFilter::default().to_jmap(&no_mailboxes()), None);
+    }
+
+    #[test]
+    fn empty_filter_operands_preserve_boolean_meaning() {
+        for (input, expected) in [
+            (json!({"or":[]}), None),
+            (json!({"not":[]}), None),
+            (
+                json!({"not":[{}]}),
+                Some(json!({"operator":"NOT","conditions":[{}]})),
+            ),
+            (json!({"or":[{}, {"from":"sender"}]}), None),
+            (
+                json!({"and":[{}, {"from":"sender"}]}),
+                Some(json!({"from":"sender"})),
+            ),
+            (
+                json!({"from":"sender", "not":[{}]}),
+                Some(
+                    json!({"operator":"AND","conditions":[{"from":"sender"},{"operator":"NOT","conditions":[{}]}]}),
+                ),
+            ),
+        ] {
+            assert_eq!(filter(input).to_jmap(&no_mailboxes()), expected);
+        }
     }
 
     #[test]
