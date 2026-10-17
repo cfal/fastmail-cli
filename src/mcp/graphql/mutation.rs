@@ -460,7 +460,7 @@ impl MutationRoot {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
 
-        let email = client.get_email(&email_id).await?;
+        let email = client.get_email_summary(&email_id).await?;
         let target = client.find_mailbox(&target_mailbox).await?;
 
         match client.move_email(&email_id, &target.id).await {
@@ -486,7 +486,7 @@ impl MutationRoot {
         let client = client.lock().await;
         let read = read.unwrap_or(true);
 
-        let email = client.get_email(&email_id).await?;
+        let email = client.get_email_summary(&email_id).await?;
         match client.mark_read(&email_id, read).await {
             Ok(()) => {
                 let status = if read { "read" } else { "unread" };

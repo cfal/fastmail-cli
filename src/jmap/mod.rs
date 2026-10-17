@@ -1058,6 +1058,14 @@ impl JmapClient {
             .await
     }
 
+    pub(crate) async fn get_email_summary(&self, id: &str) -> Result<Email> {
+        self.get_email_summaries(&[id.to_owned()])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::EmailNotFound(id.into()))
+    }
+
     fn max_objects_in_get(&self) -> usize {
         self.session
             .as_ref()

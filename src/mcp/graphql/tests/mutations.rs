@@ -1,6 +1,53 @@
 use super::*;
 
 #[tokio::test]
+async fn move_and_read_fetch_subject_summaries_and_never_write_missing_emails() {
+    use wiremock::matchers::body_string_contains;
+    for field in [
+        "markAsRead(emailId:\"e0\")",
+        "moveEmail(emailId:\"e0\", targetMailbox:\"Inbox\")",
+    ] {
+        for missing in [false, true] {
+            let server = mock_server(1).await;
+            Mock::given(body_string_contains("Email/get")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                "Email/get", {"accountId":"acct1","state":"s1",
+                    "list":if missing { json!([]) } else { json!([{"id":"e0","subject":"Subject"}]) },
+                    "notFound":if missing { vec!["e0"] } else { vec![] }}, "g0"
+            ]]}))).with_priority(1).expect(1).mount(&server).await;
+            Mock::given(body_string_contains("Email/set")).respond_with(|request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+                    "Email/set", {"accountId":"acct1","updated":{"e0":null}}, body["methodCalls"][0][2]
+                ]]}))
+            }).with_priority(1).expect(if missing { 0 } else { 1 }).mount(&server).await;
+            let response = run(
+                &server,
+                &format!("mutation {{ {field} {{ success message }} }}"),
+            )
+            .await;
+            if missing {
+                assert_eq!(response.errors[0].message, "Email not found: e0");
+            } else {
+                assert!(response.errors.is_empty(), "{:?}", response.errors);
+                let data = response.data.into_json().unwrap();
+                let status = data.as_object().unwrap().values().next().unwrap();
+                assert_eq!(status["success"], true);
+                assert!(status["message"].as_str().unwrap().contains("Subject"));
+            }
+            let fetches: Vec<_> = calls(&server)
+                .await
+                .into_iter()
+                .filter(|call| call.method == "Email/get")
+                .collect();
+            assert_eq!(fetches.len(), 1);
+            assert!(fetches[0].properties.contains(&"subject".into()));
+            assert!(!fetches[0].properties.contains(&"textBody".into()));
+            assert!(!fetches[0].properties.contains(&"bodyValues".into()));
+        }
+    }
+}
+
+#[tokio::test]
 async fn mark_read_patches_only_seen_even_after_a_concurrent_keyword_change() {
     use std::sync::Mutex;
     let server = mock_server(1).await;
