@@ -640,6 +640,14 @@ async fn domain_sender_and_name_reach_send_reply_forward_and_drafts() {
                 .flat_map(|body| body["methodCalls"].as_array().cloned().unwrap_or_default())
                 .collect();
             let creates: Vec<_> = calls.iter().filter(|call| call[0] == "Email/set").collect();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call[0] == "Identity/get")
+                    .count(),
+                1,
+                "recipient expansion and submission must use the same identity lookup"
+            );
             assert_eq!(creates.len(), 1);
             let email = &creates[0][1]["create"]["email"];
             assert_eq!(
