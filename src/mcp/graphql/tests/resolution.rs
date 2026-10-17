@@ -8,7 +8,7 @@ async fn missing_emails_distinguish_nullable_lookups_from_required_records() {
         .and(path("/jmap"))
         .and(body_string_contains("Email/get"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [["Email/get", {"list": [], "notFound": ["missing"]}, "0"]]
+            "methodResponses": [["Email/get", {"accountId":"acct1","state":"state","list": [], "notFound": ["missing"]}, "g0"]]
         })))
         .with_priority(1)
         .expect(4)
@@ -47,7 +47,7 @@ async fn a_deleted_email_during_lazy_loading_reports_an_actionable_error() {
     let server = mock_server(1).await;
     Mock::given(body_string_contains("textBody"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [["Email/get", {"list": [], "notFound": ["e0"]}, "0"]]
+            "methodResponses": [["Email/get", {"accountId":"acct1","state":"state","list": [], "notFound": ["e0"]}, "g0"]]
         })))
         .with_priority(1)
         .expect(1)
@@ -65,7 +65,7 @@ async fn threads_without_a_thread_id_report_the_specific_missing_field() {
     Mock::given(method("POST"))
         .and(path("/jmap"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [["Email/get", {"list": [{"id": "e0"}]}, "0"]]
+            "methodResponses": [["Email/get", {"accountId":"acct1","state":"state","notFound":[],"list": [{"id": "e0"}]}, "g0"]]
         })))
         .expect(1)
         .mount(&server)

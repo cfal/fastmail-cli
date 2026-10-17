@@ -1,6 +1,7 @@
 mod checkpoints;
 mod drafts;
 mod events;
+mod responses;
 mod watch;
 
 use crate::commands::SearchFilter;
@@ -336,12 +337,11 @@ struct GetResponse<T> {
 #[derive(Deserialize)]
 struct QueryResponse {
     ids: Vec<String>,
-    #[serde(default)]
     position: u64,
     #[serde(default)]
     total: Option<u64>,
-    #[serde(default, rename = "queryState")]
-    query_state: Option<String>,
+    #[serde(rename = "queryState")]
+    query_state: String,
 }
 
 /// Where a query window starts.
@@ -466,26 +466,6 @@ pub struct EmailPage {
     /// Opaque server state string for this query, letting a client tell whether
     /// the result set has changed since it last looked.
     pub query_state: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct EmailSetResponse {
-    created: Option<HashMap<String, Value>>,
-    #[serde(rename = "notCreated")]
-    not_created: Option<HashMap<String, Value>>,
-}
-
-#[derive(Deserialize)]
-struct SetResponse {
-    #[serde(rename = "notUpdated")]
-    not_updated: Option<HashMap<String, Value>>,
-}
-
-#[derive(Deserialize)]
-struct MaskedEmailCreateResponse {
-    created: Option<HashMap<String, MaskedEmail>>,
-    #[serde(rename = "notCreated")]
-    not_created: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -869,36 +849,6 @@ impl JmapClient {
         Ok(jmap_resp.method_responses)
     }
 
-    fn parse_response<T: for<'de> Deserialize<'de>>(
-        response: &Value,
-        expected_method: &str,
-    ) -> Result<T> {
-        let arr = response.as_array().ok_or_else(|| Error::Jmap {
-            method: expected_method.into(),
-            error_type: "parse".into(),
-            description: "Response is not an array".into(),
-        })?;
-
-        let method_name = arr.first().and_then(|v: &Value| v.as_str()).unwrap_or("");
-
-        if method_name == "error" {
-            let error_obj = arr.get(1).unwrap_or(&Value::Null);
-            return Err(method_error(expected_method, error_obj, "No description"));
-        }
-
-        let data = arr.get(1).ok_or_else(|| Error::Jmap {
-            method: expected_method.into(),
-            error_type: "parse".into(),
-            description: "Missing response data".into(),
-        })?;
-
-        serde_json::from_value(data.clone()).map_err(|e| Error::Jmap {
-            method: expected_method.into(),
-            error_type: "parse".into(),
-            description: e.to_string(),
-        })
-    }
-
     /// Fetch the mailbox list from the server, always. Takes `&self` so callers
     /// holding a shared client can use it concurrently.
     ///
@@ -927,7 +877,7 @@ impl JmapClient {
             .await?;
 
         let resp: GetResponse<Mailbox> =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Mailbox/get")?;
+            responses::get(&responses, "Mailbox/get", "m0", account_id, None)?;
 
         Ok(resp.list)
     }
@@ -1007,14 +957,17 @@ impl JmapClient {
         let responses = self.request(method_calls).await?;
 
         let query_resp: QueryResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/query")?;
+            responses::parse(&responses, "Email/query", "q0", account_id)?;
 
         let mut emails = Vec::new();
         if query.fetch_summaries {
             let records = if chained_get {
-                Self::parse_response::<GetResponse<Email>>(
-                    responses.get(1).unwrap_or(&Value::Null),
+                responses::get::<GetResponse<Email>>(
+                    &responses,
                     "Email/get",
+                    "g0",
+                    account_id,
+                    Some(&query_resp.ids),
                 )?
                 .list
             } else {
@@ -1036,7 +989,7 @@ impl JmapClient {
             ids: query_resp.ids,
             position: query_resp.position,
             total: query_resp.total,
-            query_state: query_resp.query_state,
+            query_state: Some(query_resp.query_state),
         })
     }
 
@@ -1113,7 +1066,7 @@ impl JmapClient {
                 .await?;
 
             let resp: GetResponse<Email> =
-                Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
+                responses::get(&responses, "Email/get", "g0", account_id, Some(ids))?;
 
             emails.extend(resp.list);
         }
@@ -1142,8 +1095,7 @@ impl JmapClient {
             state: String,
         }
 
-        let resp: StateOnly =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/get")?;
+        let resp: StateOnly = responses::get(&responses, "Email/get", "s0", account_id, Some(&[]))?;
         Ok(resp.state)
     }
 
@@ -1188,7 +1140,7 @@ impl JmapClient {
             }
 
             let resp: ChangesResponse =
-                Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/changes")?;
+                responses::parse(&responses, "Email/changes", "c0", account_id)?;
 
             created.extend(resp.created);
             state = resp.new_state;
@@ -1332,7 +1284,7 @@ impl JmapClient {
             }
 
             let resp: GetResponse<Thread> =
-                Self::parse_response(responses.first().unwrap_or(&Value::Null), "Thread/get")?;
+                responses::get(&responses, "Thread/get", "t0", account_id, Some(thread_ids))?;
 
             threads.extend(resp.list.into_iter().map(|t| (t.id, t.email_ids)));
         }
@@ -1386,7 +1338,7 @@ impl JmapClient {
             .await?;
 
         let resp: GetResponse<Identity> =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Identity/get")?;
+            responses::get(&responses, "Identity/get", "i0", account_id, None)?;
 
         Ok(resp.list)
     }
@@ -1446,43 +1398,42 @@ impl JmapClient {
         })
     }
 
-    fn parse_email_create_response(responses: &[Value]) -> Result<String> {
-        let email_resp: EmailSetResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
-
-        if let Some(ref not_created) = email_resp.not_created
-            && let Some(err) = not_created.get("email")
-        {
-            return Err(method_error("Email/set", err, "Failed to create email"));
+    fn parse_email_create_response(
+        responses: &[Value],
+        account: &str,
+        submitted: bool,
+    ) -> Result<String> {
+        let creation: Vec<_> = responses
+            .iter()
+            .filter(|value| value[2] != "s0")
+            .cloned()
+            .collect();
+        let email = responses::method_response(&creation, "Email/set", "e0", account)
+            .and_then(|data| responses::require_created_id(data, "Email/set", "email"));
+        if !submitted {
+            return email;
         }
-
-        // Check EmailSubmission/set response if present (index 1)
-        if let Some(submission_resp) = responses.get(1) {
-            let sub: EmailSetResponse =
-                Self::parse_response(submission_resp, "EmailSubmission/set")?;
-            if let Some(ref not_created) = sub.not_created
-                && let Some(err) = not_created.get("submission")
-            {
-                return Err(method_error(
-                    "EmailSubmission/set",
-                    err,
-                    "Email created but submission failed",
-                ));
+        let submission = responses::submission_response(
+            responses,
+            "s0",
+            account,
+            email.as_deref().unwrap_or(""),
+        );
+        match (email, submission) {
+            (Ok(email), Ok((submission, warning))) => {
+                if let Some(warning) = warning {
+                    tracing::warn!(email_id = %email, submission_id = %submission, %warning);
+                }
+                Ok(email)
             }
+            (Err(_), Ok((submission, _))) => Err(responses::invalid(
+                "EmailSubmission/set",
+                &format!(
+                    "Submission {submission} accepted, but created email ID unavailable; do not resend"
+                ),
+            )),
+            (Ok(_), Err(error)) | (Err(error), Err(_)) => Err(error),
         }
-
-        email_resp
-            .created
-            .as_ref()
-            .and_then(|created| created.get("email"))
-            .and_then(|email| email.get("id"))
-            .and_then(Value::as_str)
-            .map(String::from)
-            .ok_or_else(|| Error::Jmap {
-                method: "Email/set".into(),
-                error_type: "unknown".into(),
-                description: "No email ID returned".into(),
-            })
     }
 
     /// Shared helper: build email_create map with common fields and submit it.
@@ -1533,8 +1484,10 @@ impl JmapClient {
             }
         }
 
-        let responses = self.request(ctx.build_method_calls(email_create)).await?;
-        let email_id = Self::parse_email_create_response(&responses)?;
+        let calls = ctx.build_method_calls(email_create);
+        let submitted = calls.len() > 1;
+        let responses = self.request(calls).await?;
+        let email_id = Self::parse_email_create_response(&responses, &ctx.account_id, submitted)?;
 
         debug!(email_id = %email_id, draft = ctx.draft, "Email created successfully");
         Ok(email_id)
@@ -1613,16 +1566,8 @@ impl JmapClient {
             ])])
             .await?;
 
-        let resp: SetResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
-
-        if let Some(ref not_updated) = resp.not_updated
-            && let Some(err) = not_updated.get(email_id)
-        {
-            return Err(method_error("Email/set", err, "Failed to move email"));
-        }
-
-        Ok(())
+        let data = responses::method_response(&responses, "Email/set", "m0", account_id)?;
+        responses::require_updated(data, "Email/set", email_id)
     }
 
     #[instrument(skip(self))]
@@ -1909,16 +1854,8 @@ impl JmapClient {
             ])])
             .await?;
 
-        let resp: SetResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "Email/set")?;
-
-        if let Some(ref not_updated) = resp.not_updated
-            && let Some(err) = not_updated.get(email_id)
-        {
-            return Err(method_error("Email/set", err, "Failed to update keywords"));
-        }
-
-        Ok(())
+        let data = responses::method_response(&responses, "Email/set", "k0", account_id)?;
+        responses::require_updated(data, "Email/set", email_id)
     }
 
     /// List all masked email addresses
@@ -1939,7 +1876,7 @@ impl JmapClient {
             .await?;
 
         let resp: GetResponse<MaskedEmail> =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/get")?;
+            responses::get(&responses, "MaskedEmail/get", "me0", account_id, None)?;
 
         Ok(resp.list)
     }
@@ -1979,26 +1916,10 @@ impl JmapClient {
             ])])
             .await?;
 
-        let resp: MaskedEmailCreateResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/set")?;
-
-        if let Some(ref not_created) = resp.not_created
-            && let Some(err) = not_created.get("new")
-        {
-            return Err(method_error(
-                "MaskedEmail/set",
-                err,
-                "Failed to create masked email",
-            ));
-        }
-
-        resp.created
-            .and_then(|mut c| c.remove("new"))
-            .ok_or_else(|| Error::Jmap {
-                method: "MaskedEmail/set".into(),
-                error_type: "unknown".into(),
-                description: "No masked email returned".into(),
-            })
+        let data = responses::method_response(&responses, "MaskedEmail/set", "me0", account_id)?;
+        responses::require_created_id(data, "MaskedEmail/set", "new")?;
+        serde_json::from_value(data["created"]["new"].clone())
+            .map_err(|error| responses::invalid("MaskedEmail/set", &error.to_string()))
     }
 
     /// Update a masked email's state (enable/disable/delete)
@@ -2035,20 +1956,8 @@ impl JmapClient {
             ])])
             .await?;
 
-        let resp: SetResponse =
-            Self::parse_response(responses.first().unwrap_or(&Value::Null), "MaskedEmail/set")?;
-
-        if let Some(ref not_updated) = resp.not_updated
-            && let Some(err) = not_updated.get(id)
-        {
-            return Err(method_error(
-                "MaskedEmail/set",
-                err,
-                "Failed to update masked email",
-            ));
-        }
-
-        Ok(())
+        let data = responses::method_response(&responses, "MaskedEmail/set", "me0", account_id)?;
+        responses::require_updated(data, "MaskedEmail/set", id)
     }
 }
 

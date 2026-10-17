@@ -1,4 +1,5 @@
-use super::{EMAIL_FULL_PROPERTIES, EMAIL_SUMMARY_PROPERTIES, JmapClient, method_error};
+use super::responses::{invalid, method_response, require_updated, submission_response};
+use super::{EMAIL_FULL_PROPERTIES, EMAIL_SUMMARY_PROPERTIES, JmapClient};
 use crate::error::{Error, Result};
 use crate::models::{Email, Identity, Mailbox};
 use serde::{Deserialize, Serialize};
@@ -47,48 +48,9 @@ fn role_id(mailboxes: &[Mailbox], role: &str) -> Result<String> {
     Ok(mailbox.id.clone())
 }
 
-fn invalid(method: &str, description: &str) -> Error {
-    Error::Jmap {
-        method: method.into(),
-        error_type: "parse".into(),
-        description: description.into(),
-    }
-}
-
-fn response<'a>(responses: &'a [Value], method: &str, call_id: &str) -> Result<&'a Value> {
-    let mut matching = responses
-        .iter()
-        .filter(|value| value[0] == method && value[2] == call_id);
-    if let Some(value) = matching.next() {
-        if matching.next().is_some() || value.as_array().is_none_or(|array| array.len() != 3) {
-            return Err(invalid(method, "Conflicting or malformed method responses"));
-        }
-        return Ok(&value[1]);
-    }
-    if let Some(error) = responses
-        .iter()
-        .find(|value| value[0] == "error" && value[2] == call_id)
-    {
-        return Err(method_error(method, &error[1], "Draft operation failed"));
-    }
-    Err(invalid(method, "Missing method response"))
-}
-
 fn require_update(responses: &[Value], account: &str, id: &str, call_id: &str) -> Result<()> {
-    let data = response(responses, "Email/set", call_id)?;
-    if data["accountId"] != account {
-        return Err(invalid("Email/set", "Account mismatch"));
-    }
-    if let Some(error) = data["notUpdated"].get(id) {
-        return Err(method_error("Email/set", error, "Draft update failed"));
-    }
-    if !data["updated"]
-        .as_object()
-        .is_some_and(|map| map.contains_key(id))
-    {
-        return Err(invalid("Email/set", "No successful draft update returned"));
-    }
-    Ok(())
+    let data = method_response(responses, "Email/set", call_id, account)?;
+    require_updated(data, "Email/set", id)
 }
 
 impl JmapClient {
@@ -127,9 +89,10 @@ impl JmapClient {
             list: Vec<Email>,
             not_found: Vec<String>,
         }
-        let data: Snapshot =
-            serde_json::from_value(response(&responses, "Email/get", "draft")?.clone())
-                .map_err(|error| invalid("Email/get", &error.to_string()))?;
+        let data: Snapshot = serde_json::from_value(
+            method_response(&responses, "Email/get", "draft", account)?.clone(),
+        )
+        .map_err(|error| invalid("Email/get", &error.to_string()))?;
         if data.account_id != account {
             return Err(invalid("Email/get", "Account mismatch"));
         }
@@ -179,30 +142,8 @@ impl JmapClient {
                 }, "submitDraft"
             ])])
             .await?;
-        let data = response(&responses, "EmailSubmission/set", "submitDraft")?;
-        if data["accountId"] != account {
-            return Err(invalid("EmailSubmission/set", "Account mismatch"));
-        }
-        if let Some(error) = data["notCreated"].get("submission") {
-            return Err(method_error(
-                "EmailSubmission/set",
-                error,
-                "Draft submission failed",
-            ));
-        }
-        let id = data["created"]["submission"]["id"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| invalid("EmailSubmission/set", "No successful submission returned"))?
-            .to_owned();
-        // An implicit Email/set can fail after submission succeeds. Never hide
-        // that success or encourage sending the same message a second time.
-        let filing_warning = match require_update(&responses, account, &draft.id, "submitDraft") {
-            Ok(()) => None,
-            Err(error) => Some(format!(
-                "Submitted, but filing in Sent is unconfirmed: {error}. Do not resend; inspect the email's mailboxes."
-            )),
-        };
+        let (id, filing_warning) =
+            submission_response(&responses, "submitDraft", account, &draft.id)?;
         Ok(DraftSubmission { id, filing_warning })
     }
 

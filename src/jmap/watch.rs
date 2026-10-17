@@ -332,7 +332,7 @@ mod tests {
             .and(body_string_contains("Email/changes"))
             .and(body_string_contains(r#""sinceState":"s0""#))
             .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response("Email/changes", json!({
-                "newState": "s1", "created": created, "updated": [], "destroyed": [], "hasMoreChanges": false
+                "accountId":"test-account", "newState": "s1", "created": created, "updated": [], "destroyed": [], "hasMoreChanges": false
             }))))
             .mount(&server).await;
         Mock::given(method("POST"))
@@ -346,6 +346,25 @@ mod tests {
             .mount(&server)
             .await;
         server
+    }
+
+    #[tokio::test]
+    async fn incomplete_detail_response_never_advances_the_arrival_checkpoint() {
+        let server = arrivals_server(&["e1", "e2"]).await;
+        Mock::given(body_string_contains("Email/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
+                "Email/get",
+                json!({"list":[{"id":"e1"}], "notFound":[]}),
+            )))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut watcher = watcher(mock_client(&server.uri()), true);
+        assert!(
+            matches!(watcher.drain().await, Err(Error::Jmap { error_type, .. }) if error_type == "parse")
+        );
+        assert_eq!(watcher.state, "s0");
     }
 
     #[tokio::test]
@@ -409,7 +428,7 @@ mod tests {
             .and(body_string_contains("Email/changes"))
             .respond_with(ResponseTemplate::new(200).set_body_json(jmap_response(
                 "Email/changes",
-                json!({"newState":"s1", "created":[], "updated":["old"], "destroyed":["gone"], "hasMoreChanges":false}),
+                json!({"accountId":"test-account","newState":"s1", "created":[], "updated":["old"], "destroyed":["gone"], "hasMoreChanges":false}),
             )))
             .expect(1)
             .mount(&server)

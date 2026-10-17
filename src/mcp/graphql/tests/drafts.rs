@@ -32,7 +32,7 @@ async fn draft_server() -> (MockServer, Arc<Mutex<Value>>) {
             let body: Value = serde_json::from_slice(&req.body).unwrap();
             let call = &body["methodCalls"][0];
             let account = &call[1]["accountId"];
-            let payload = match call[0].as_str().unwrap() {
+            let mut payload = match call[0].as_str().unwrap() {
                 "Email/get" => json!({"accountId":account,"state":"snapshot", "list":[served.lock().unwrap().clone()], "notFound":[]}),
                 "Identity/get" => json!({"list":[{"id":"domain", "name":"Identity Name", "email":"*@example.com"}]}),
                 "Mailbox/get" => json!({"list":[
@@ -52,6 +52,11 @@ async fn draft_server() -> (MockServer, Arc<Mutex<Value>>) {
                 }
                 other => panic!("Unexpected call {other}"),
             };
+            payload["accountId"] = account.clone();
+            if call[0] == "Mailbox/get" || call[0] == "Identity/get" {
+                payload["state"] = json!("state");
+                payload["notFound"] = json!([]);
+            }
             ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[call[0],payload,call[2]]]}))
         }).with_priority(2).mount(&server).await;
     (server, email)
@@ -273,7 +278,7 @@ async fn draft_operations_use_roles_despite_same_named_folders() {
     let (server, email) = draft_server().await;
     email.lock().unwrap()["mailboxIds"] = json!({"real-drafts":true,"other":true});
     Mock::given(body_string_contains("Mailbox/get")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[
-        ["Mailbox/get",{"list":[
+        ["Mailbox/get",{"accountId":"acct1","state":"state","notFound":[],"list":[
             {"id":"decoy-drafts","name":"Drafts"}, {"id":"decoy-sent","name":"Sent"}, {"id":"decoy-trash","name":"Trash"},
             {"id":"real-drafts","name":"Entwuerfe","role":"drafts"}, {"id":"real-sent","name":"Gesendet","role":"sent"}, {"id":"real-trash","name":"Papierkorb","role":"trash"}
         ]},"m0"]
@@ -328,7 +333,7 @@ async fn missing_or_duplicate_system_roles_do_not_issue_approvals() {
         Mock::given(body_string_contains("Mailbox/get"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(
-                    json!({"methodResponses":[["Mailbox/get",{"list":roles},"m0"]]}),
+                    json!({"methodResponses":[["Mailbox/get",{"accountId":"acct1","state":"state","notFound":[],"list":roles},"m0"]]}),
                 ),
             )
             .with_priority(1)
@@ -438,7 +443,7 @@ async fn saved_draft_approval_binds_resolved_identity_and_account() {
             Mock::given(body_string_contains("Identity/get"))
                 .respond_with(
                     ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[
-                        ["Identity/get",{"list":[identity]},"i0"]
+                        ["Identity/get",{"accountId":"acct1","state":"state","notFound":[],"list":[identity]},"i0"]
                     ]})),
                 )
                 .with_priority(1)

@@ -6,10 +6,10 @@ async fn attachment_lists_skip_parts_without_blob_ids_and_missing_blob_is_null()
     let server = mock_server(1).await;
     Mock::given(body_string_contains("Email/get"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [["Email/get", {"list": [{"id": "e0", "attachments": [
+            "methodResponses": [["Email/get", {"accountId":"acct1","state":"state","notFound":[],"list": [{"id": "e0", "attachments": [
                 {"name": "unavailable.txt"},
                 {"blobId": "blob0", "name": "notes.txt", "type": "text/plain", "size": 18}
-            ]}]}, "0"]]
+            ]}]}, "g0"]]
         })))
         .with_priority(1)
         .expect(1)

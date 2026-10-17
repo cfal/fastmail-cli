@@ -1,5 +1,156 @@
 use super::*;
 
+#[test]
+fn method_results_are_selected_by_method_call_and_account_without_conflicts() {
+    let result = json!(["Email/set", {"accountId":"acct", "updated":{"e1":null}}, "update"]);
+    let supplemental = json!(["Mailbox/get", {"accountId":"acct"}, "update"]);
+    for (values, valid) in [
+        (json!([supplemental, result]), true),
+        (json!([result, result]), false),
+        (
+            json!([result, ["error", {"type":"serverFail"}, "update"]]),
+            false,
+        ),
+        (
+            json!([["Email/set", {"accountId":"other"}, "update"]]),
+            false,
+        ),
+        (json!([["Email/set", {"accountId":"acct"}, "wrong"]]), false),
+        (
+            json!([["Mailbox/set", {"accountId":"acct"}, "update"]]),
+            false,
+        ),
+        (
+            json!([["Email/set", {"accountId":"acct"}, "update", "extra"]]),
+            false,
+        ),
+        (json!([["Email/set", [], "update"]]), false),
+        (json!([["Email/set", {}, 7]]), false),
+        (json!([]), false),
+    ] {
+        assert_eq!(
+            responses::method_response(values.as_array().unwrap(), "Email/set", "update", "acct")
+                .is_ok(),
+            valid,
+            "{values}"
+        );
+    }
+}
+
+#[test]
+fn compose_requires_submission_evidence_but_never_undoes_accepted_delivery() {
+    let creation = json!(["Email/set", {"accountId":"acct","created":{"email":{"id":"e1"}}}, "e0"]);
+    let submitted = json!(["EmailSubmission/set", {"accountId":"acct","created":{"submission":{"id":"sub1"}}}, "s0"]);
+    let filing = json!(["Email/set", {"accountId":"acct","updated":{"e1":null}}, "s0"]);
+    for values in [
+        json!([creation, submitted, filing]),
+        json!([filing, submitted, creation]),
+        json!([creation, submitted]),
+        json!([creation, submitted, filing, filing]),
+        json!([creation, submitted, ["error", {"type":"serverFail"}, "s0"]]),
+        json!([creation, submitted, ["Email/set", {"accountId":"other","updated":{"e1":null}}, "s0"]]),
+        json!([creation, submitted, ["Email/set", [], "s0", "extra"]]),
+    ] {
+        assert_eq!(
+            JmapClient::parse_email_create_response(values.as_array().unwrap(), "acct", true)
+                .unwrap(),
+            "e1",
+            "{values}"
+        );
+    }
+    for values in [
+        json!([creation]),
+        json!([creation, submitted, submitted]),
+        json!([creation, ["EmailSubmission/set", {"accountId":"acct"}, "s0"]]),
+        json!([creation, ["EmailSubmission/set", {"accountId":"acct","created":{"submission":{"id":""}}}, "s0"]]),
+        json!([creation, ["EmailSubmission/set", {"accountId":"acct","created":{"submission":{"id":"sub1"}},"notCreated":{"submission":{"type":"forbidden"}}}, "s0"]]),
+    ] {
+        let error =
+            JmapClient::parse_email_create_response(values.as_array().unwrap(), "acct", true)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("do not retry automatically"),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        JmapClient::parse_email_create_response(&[creation], "acct", false).unwrap(),
+        "e1"
+    );
+    let error = JmapClient::parse_email_create_response(&[submitted], "acct", true).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("accepted, but created email ID unavailable; do not resend")
+    );
+}
+
+#[tokio::test]
+async fn legacy_updates_require_positive_evidence_and_never_retry_ambiguous_writes() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for data in [
+        json!({}),
+        json!({"updated":{}}),
+        json!({"updated":[]}),
+        json!({"updated":{"e1":7}}),
+        json!({"updated":{"e1":null},"notUpdated":{"e1":{"type":"forbidden"}}}),
+        json!({"updated":{"e1":null}}),
+    ] {
+        let valid = data == json!({"updated":{"e1":null}});
+        for operation in ["move", "seen", "masked"] {
+            let server = MockServer::start().await;
+            let payload = data.clone();
+            Mock::given(method("POST"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: Value = serde_json::from_slice(&request.body).unwrap();
+                    let call = &body["methodCalls"][0];
+                    let mut data = payload.clone();
+                    data["accountId"] = call[1]["accountId"].clone();
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"methodResponses":[[call[0],data,call[2]]]}))
+                })
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = JmapClient::with_test_session(&server.uri());
+            let result = match operation {
+                "move" => client.move_email("e1", "inbox").await,
+                "seen" => client.mark_read("e1", true).await,
+                _ => {
+                    client
+                        .update_masked_email("e1", Some("disabled"), None, None)
+                        .await
+                }
+            };
+            assert_eq!(result.is_ok(), valid, "{operation}: {data}: {result:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_get_requires_complete_disjoint_id_coverage() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for (list, missing, valid) in [
+        (json!([{"id":"e2"},{"id":"e1"}]), json!([]), true),
+        (json!([{"id":"e1"}]), json!(["e2"]), true),
+        (json!([]), json!(["e1", "e2"]), true),
+        (json!([{"id":"e1"}]), json!([]), false),
+        (json!([{"id":"e1"},{"id":"e1"}]), json!(["e2"]), false),
+        (json!([{"id":"e1"}]), json!(["e1", "e2"]), false),
+        (json!([{"id":"other"}]), json!(["e1", "e2"]), false),
+        (json!([]), json!(null), false),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+            "Email/get", {"accountId":"acct1","state":"s1","list":list,"notFound":missing}, "g0"
+        ]]}))).expect(1).mount(&server).await;
+        let result = JmapClient::with_test_session(&server.uri())
+            .get_emails(&["e1".into(), "e2".into(), "e1".into()])
+            .await;
+        assert_eq!(result.is_ok(), valid, "{list}, {missing}: {result:?}");
+    }
+}
+
 #[tokio::test]
 async fn draft_snapshots_require_matching_account_id_state_and_classification() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -117,7 +268,7 @@ async fn draft_submission_requires_positive_evidence_and_preserves_filing_failur
         let server = MockServer::start().await;
         Mock::given(body_string_contains("Mailbox/get"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
-                json!({"methodResponses":[["Mailbox/get",{"list":[
+                json!({"methodResponses":[["Mailbox/get",{"accountId":"acct1","state":"state","notFound":[],"list":[
                 {"id":"drafts","name":"Drafts","role":"drafts"},
                 {"id":"sent","name":"Sent","role":"sent"},
                 {"id":"trash","name":"Trash","role":"trash"}
@@ -170,7 +321,7 @@ async fn draft_discard_requires_positive_update_evidence() {
                 "accountId":"acct1","state":"fresh","list":[{"id":"draft","keywords":{"$draft":true}}],"notFound":[]
             },"draft"]]}))).expect(1).mount(&server).await;
         Mock::given(body_string_contains("Mailbox/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Mailbox/get",{"list":[{"id":"trash","name":"Trash","role":"trash"}]},"m0"]]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Mailbox/get",{"accountId":"acct1","state":"state","notFound":[],"list":[{"id":"trash","name":"Trash","role":"trash"}]},"m0"]]})))
             .expect(1).mount(&server).await;
         Mock::given(body_string_contains("Email/set"))
             .respond_with(
@@ -1146,8 +1297,26 @@ pub(super) fn mock_client(uri: &str) -> JmapClient {
 }
 
 /// One `methodResponses` envelope around a single method result.
-pub(super) fn jmap_response(method: &str, result: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({ "methodResponses": [[method, result, "c0"]] })
+pub(super) fn jmap_response(method: &str, mut result: serde_json::Value) -> serde_json::Value {
+    let call_id = match method {
+        "Mailbox/get" => "m0",
+        "Identity/get" => "i0",
+        "Email/get"
+            if result["list"] == json!([])
+                && result["notFound"].as_array().is_none_or(Vec::is_empty) =>
+        {
+            "s0"
+        }
+        "Email/get" => "g0",
+        _ => "c0",
+    };
+    if method.ends_with("/get") {
+        let map = result.as_object_mut().unwrap();
+        map.entry("accountId").or_insert(json!("test-account"));
+        map.entry("state").or_insert(json!("state"));
+        map.entry("notFound").or_insert(json!([]));
+    }
+    serde_json::json!({ "methodResponses": [[method, result, call_id]] })
 }
 
 #[tokio::test]
@@ -1159,13 +1328,15 @@ async fn email_thread_and_query_fetches_respect_the_session_object_limit() {
         let calls = body["methodCalls"].as_array().unwrap();
         assert_eq!(calls.len(), 1);
         let call = &calls[0];
-        let result = if call[0] == "Email/query" {
+        let mut result = if call[0] == "Email/query" {
             json!({"ids": ["e0", "e1", "e2", "e3", "e4"], "position": 0, "queryState":"q1"})
         } else {
             let ids = call[1]["ids"].as_array().unwrap();
             assert!(ids.len() <= 2);
             json!({"list": ids.iter().map(|id| json!({"id":id, "threadId":"t0", "emailIds":["e0", "e1", "e2", "e3", "e4"]})).collect::<Vec<_>>(), "notFound": []})
         };
+        result["accountId"] = call[1]["accountId"].clone();
+        result["state"] = json!("state");
         ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[call[0], result, call[2]]]}))
     }).mount(&server).await;
     let mut client = mock_client(&server.uri());
@@ -1244,8 +1415,8 @@ async fn failed_submission_leaves_a_draft_not_a_sent_message() {
                 assert_eq!(update["mailboxIds"], json!({"sent":true}));
                 assert_eq!(update["keywords/$draft"], Value::Null);
                 json!({"methodResponses":[
-                    ["Email/set", {"created":{"email":{"id":"draft-1"}}}, "e0"],
-                    ["EmailSubmission/set", {"notCreated":{"submission":{"type":"forbidden", "description":"Not sent"}}}, "s0"]
+                    ["Email/set", {"accountId":"test-account","created":{"email":{"id":"draft-1"}}}, "e0"],
+                    ["EmailSubmission/set", {"accountId":"test-account","notCreated":{"submission":{"type":"forbidden", "description":"Not sent"}}}, "s0"]
                 ]})
             }
             name => panic!("Unexpected method {name}"),
@@ -1320,6 +1491,7 @@ async fn test_email_changes_follows_has_more_changes() {
             "Email/changes",
             serde_json::json!({
                 "oldState": "s0",
+                "accountId": "test-account",
                 "newState": "s1",
                 "hasMoreChanges": true,
                 "created": ["e1", "e2"],
@@ -1336,6 +1508,7 @@ async fn test_email_changes_follows_has_more_changes() {
             "Email/changes",
             serde_json::json!({
                 "oldState": "s1",
+                "accountId": "test-account",
                 "newState": "s2",
                 "hasMoreChanges": false,
                 "created": ["e3"],

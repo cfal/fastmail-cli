@@ -1,3 +1,4 @@
+use super::responses::invalid as invalid_response;
 use super::{CHANGES_PAGE, JmapClient};
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -42,40 +43,12 @@ const LIMITS: ChangeLimits = ChangeLimits {
     bytes: 16 * 1024 * 1024,
 };
 
-fn invalid_response(method: &str, description: &str) -> Error {
-    Error::Jmap {
-        method: method.into(),
-        error_type: "parse".into(),
-        description: description.into(),
-    }
-}
-
 fn limit_exceeded() -> Error {
     Error::Jmap {
         method: "Email/changes".into(),
         error_type: "limitExceeded".into(),
         description: "Complete change batch exceeds safety limits; no checkpoint returned".into(),
     }
-}
-
-fn checkpoint_response<T: for<'de> Deserialize<'de>>(
-    responses: &[Value],
-    method: &str,
-    call_id: &str,
-) -> Result<T> {
-    // JMAP permits supplemental responses to a method call. Only its requested
-    // result (or error) carries the checkpoint; conflicting results fail closed.
-    let mut matching = responses.iter().filter(|response| {
-        response[2] == call_id && (response[0] == method || response[0] == "error")
-    });
-    let response = matching.next().unwrap_or(&Value::Null);
-    if matching.next().is_some() || response.as_array().is_none_or(|array| array.len() != 3) {
-        return Err(invalid_response(
-            method,
-            "Unexpected method response or call ID",
-        ));
-    }
-    JmapClient::parse_response(response, method)
 }
 
 impl JmapClient {
@@ -101,7 +74,8 @@ impl JmapClient {
             not_found: Vec<String>,
         }
 
-        let response: StateResponse = checkpoint_response(&responses, "Email/get", "s0")?;
+        let response: StateResponse =
+            super::responses::get(&responses, "Email/get", "s0", account_id, Some(&[]))?;
         if response.account_id != account_id
             || !response.list.is_empty()
             || !response.not_found.is_empty()
@@ -170,7 +144,8 @@ impl JmapClient {
                     "c0"
                 ])])
                 .await?;
-            let page: ChangePage = checkpoint_response(&responses, "Email/changes", "c0")?;
+            let page: ChangePage =
+                super::responses::parse(&responses, "Email/changes", "c0", account_id)?;
             if page.account_id != account_id || page.old_state != batch.new_state {
                 return Err(invalid_response(
                     "Email/changes",

@@ -485,7 +485,7 @@ async fn pagination_is_stable_when_new_mail_arrives() {
                     .into_iter()
                     .chain(shifted.iter().take(10).cloned())
                     .collect();
-                let payload = match name {
+                let mut payload = match name {
                     "Email/query" => {
                         let anchor = args["anchor"].as_str().unwrap();
                         let idx = all.iter().position(|i| i == anchor).unwrap() as i64;
@@ -494,7 +494,7 @@ async fn pagination_is_stable_when_new_mail_arrives() {
                         let limit = args["limit"].as_u64().unwrap_or(10) as usize;
                         json!({
                             "ids": all.iter().skip(start).take(limit).collect::<Vec<_>>(),
-                            "position": start
+                            "position": start, "queryState":"qs-2"
                         })
                     }
                     "Email/get" => json!({
@@ -504,6 +504,8 @@ async fn pagination_is_stable_when_new_mail_arrives() {
                     }),
                     _ => json!({ "list": [], "notFound": [] }),
                 };
+                payload["accountId"] = args["accountId"].clone();
+                payload["state"] = json!("state");
                 responses.push(json!([name, payload, tag]));
             }
             ResponseTemplate::new(200).set_body_json(json!({ "methodResponses": responses }))

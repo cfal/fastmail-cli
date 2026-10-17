@@ -67,13 +67,13 @@ async fn subscription_does_not_retain_lazy_records_between_events() {
     let server = mock_server(1).await;
     Mock::given(body_string_contains(r#""ids":[]"#))
         .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"methodResponses":[["Email/get", {"state":"s0", "list":[]}, "s0"]]}),
+            json!({"methodResponses":[["Email/get", {"accountId":"acct1","state":"s0", "list":[],"notFound":[]}, "s0"]]}),
         ))
         .with_priority(1)
         .mount(&server)
         .await;
     Mock::given(body_string_contains("Email/changes"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Email/changes", {"newState":"s1", "created":["e0"], "updated":[], "destroyed":[], "hasMoreChanges":false}, "c0"]]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Email/changes", {"accountId":"acct1","newState":"s1", "created":["e0"], "updated":[], "destroyed":[], "hasMoreChanges":false}, "c0"]]})))
         .with_priority(1).mount(&server).await;
     let schema = build_schema();
     let req = request(

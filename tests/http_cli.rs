@@ -22,7 +22,7 @@ async fn server_with_identities(identities: Value) -> MockServer {
         .respond_with(move |req: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&req.body).unwrap();
             let responses: Vec<_> = body["methodCalls"].as_array().unwrap().iter().map(|call| {
-                let value = match call[0].as_str().unwrap() {
+                let mut value = match call[0].as_str().unwrap() {
                     "Mailbox/get" => json!({"list": [
                         {"id":"inbox","name":"Inbox","role":"inbox"},
                         {"id":"sent","name":"Sent","role":"sent"},
@@ -40,6 +40,14 @@ async fn server_with_identities(identities: Value) -> MockServer {
                     "MaskedEmail/set" => json!({"created":{"new":{"id":"mask1","email":"mask@example.com","state":"enabled"}},"updated":{"mask1":null},"destroyed":["mask1"]}),
                     name => panic!("Unexpected JMAP method {name}"),
                 };
+                value["accountId"] = call[1]["accountId"].clone();
+                if call[0].as_str().unwrap().ends_with("/get") {
+                    value["state"] = json!("s1");
+                    value["notFound"] = json!([]);
+                    if call[1]["ids"] == json!([]) {
+                        value["list"] = json!([]);
+                    }
+                }
                 json!([call[0],value,call[2]])
             }).collect();
             ResponseTemplate::new(200).set_body_json(json!({"methodResponses":responses}))
@@ -418,7 +426,7 @@ async fn readable_email_server() -> MockServer {
                 }])
             };
             ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
-                "Email/get", {"state":"s0","list":list}, call[2]
+                "Email/get", {"accountId":"acct","state":"s0","notFound":[],"list":list}, call[2]
             ]]}))
         })
         .with_priority(1)
@@ -515,7 +523,7 @@ async fn readable_watch_is_flushed_ndjson_only_for_full_arrivals() {
         let server = readable_email_server().await;
         Mock::given(body_string_contains("Email/changes"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
-                "Email/changes", {"newState":"s1","hasMoreChanges":false,"created":["e1"],"updated":[],"destroyed":[]}, "c0"
+                "Email/changes", {"accountId":"acct","newState":"s1","hasMoreChanges":false,"created":["e1"],"updated":[],"destroyed":[]}, "c0"
             ]]}))).with_priority(1).mount(&server).await;
         let mut child = command(&server, home.path())
             .args(["watch", "--poll", "1"])
@@ -583,11 +591,11 @@ async fn domain_sender_and_name_reach_send_reply_forward_and_drafts() {
         .and(wiremock::matchers::body_string_contains("Email/get"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
-                "Email/get", {"list":[{"id":"original", "threadId":"thread", "subject":"Original",
+                "Email/get", {"accountId":"acct","state":"s1","notFound":[],"list":[{"id":"original", "threadId":"thread", "subject":"Original",
                     "from":[{"email":"other@example.com"}],
                     "to":[{"email":"new+tag@example.com"}],
                     "cc":[{"email":"NEW+TAG@example.com"},{"email":"another@example.com"}]
-                }]}, "e0"
+                }]}, "g0"
             ]]})),
         )
         .with_priority(1)
@@ -913,7 +921,7 @@ async fn unsupported_images_are_reported_without_losing_other_downloads() {
         .and(path("/cli/v1/jmap"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
-                "Email/get", {"list":[{"id":"e1","attachments":[
+                "Email/get", {"accountId":"acct","state":"s1","notFound":[],"list":[{"id":"e1","attachments":[
                     {"blobId":"tiff","name":"scan.tiff","type":"image/tiff"},
                     {"blobId":"png","name":"corrupt.png","type":"image/png"},
                     {"blobId":"text","name":"notes.txt","type":"text/plain"}
@@ -973,7 +981,7 @@ async fn colliding_download_names_preserve_existing_and_new_files() {
         .and(path("/cli/v1/jmap"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
-                "Email/get", {"list":[{"id":"e1","attachments":[
+                "Email/get", {"accountId":"acct","state":"s1","notFound":[],"list":[{"id":"e1","attachments":[
                     {"blobId":"first","name":"../notes.txt","type":"text/plain"},
                     {"blobId":"second","name":"notes.txt","type":"text/plain"}
                 ]}]}, "g0"

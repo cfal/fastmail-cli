@@ -147,7 +147,7 @@ async fn mock_server(count: usize) -> MockServer {
             let args = mc.get(1).cloned().unwrap_or(Value::Null);
             let tag = mc.get(2).and_then(Value::as_str).unwrap_or("c0");
 
-            let payload = match name {
+            let mut payload = match name {
                 "Mailbox/get" => json!({ "list": [{
                     "id": "mb1", "name": "Inbox", "role": "inbox",
                     "totalEmails": 10, "unreadEmails": 2,
@@ -208,7 +208,14 @@ async fn mock_server(count: usize) -> MockServer {
                             .filter_map(Value::as_str)
                             .map(str::to_owned)
                             .collect(),
-                        None => ids.clone(),
+                        None => responses
+                            .iter()
+                            .find_map(|response: &Value| {
+                                (response[0] == "Email/query").then(|| {
+                                    serde_json::from_value(response[1]["ids"].clone()).unwrap()
+                                })
+                            })
+                            .unwrap_or_default(),
                     };
                     let full = args
                         .get("properties")
@@ -224,6 +231,11 @@ async fn mock_server(count: usize) -> MockServer {
                 "Thread/get" => json!({ "list": [{ "id": "t1", "emailIds": ids }] }),
                 _ => json!({ "list": [], "notFound": [] }),
             };
+            payload["accountId"] = args["accountId"].clone();
+            if name.ends_with("/get") {
+                payload["state"] = json!("state");
+                payload["notFound"] = json!([]);
+            }
             responses.push(json!([name, payload, tag]));
         }
 

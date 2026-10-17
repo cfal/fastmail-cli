@@ -20,7 +20,7 @@ async fn mark_read_patches_only_seen_even_after_a_concurrent_keyword_change() {
                 keywords["$seen"] = seen.clone();
             }
             ResponseTemplate::new(200).set_body_json(
-                json!({"methodResponses":[["Email/set", {"updated":{"e0":null}}, "k0"]]}),
+                json!({"methodResponses":[["Email/set", {"accountId":"acct1","updated":{"e0":null}}, "k0"]]}),
             )
         })
         .with_priority(1)
@@ -68,11 +68,11 @@ async fn spam_confirmation_requires_an_unexpired_one_shot_preview_for_the_same_e
     use wiremock::matchers::body_string_contains;
     let server = mock_server(2).await;
     Mock::given(body_string_contains("Mailbox/get"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Mailbox/get", {"list":[{"id":"junk", "name":"Junk", "role":"junk"}]}, "m0"]]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Mailbox/get", {"accountId":"acct1","state":"state","notFound":[],"list":[{"id":"junk", "name":"Junk", "role":"junk"}]}, "m0"]]})))
         .with_priority(1).mount(&server).await;
     Mock::given(body_string_contains("Email/set"))
         .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"methodResponses":[["Email/set", {"updated":{"e0":null}}, "u0"]]}),
+            json!({"methodResponses":[["Email/set", {"accountId":"acct1","updated":{"e0":null}}, "m0"]]}),
         ))
         .with_priority(1)
         .expect(1)
@@ -165,7 +165,7 @@ pub(super) async fn compose_server() -> MockServer {
             .unwrap()
             .iter()
             .map(|c| {
-                let payload = match c[0].as_str().unwrap() {
+                let mut payload = match c[0].as_str().unwrap() {
                     "Mailbox/get" => json!({"list": [
                         {"id":"sent", "name":"Sent", "role":"sent"},
                         {"id":"drafts", "name":"Drafts", "role":"drafts"}
@@ -180,6 +180,11 @@ pub(super) async fn compose_server() -> MockServer {
                     "EmailSubmission/set" => json!({"created":{"submission":{"id":"submitted"}}}),
                     _ => panic!("Unexpected method: {}", c[0]),
                 };
+                payload["accountId"] = c[1]["accountId"].clone();
+                if c[0].as_str().unwrap().ends_with("/get") {
+                    payload["state"] = json!("state");
+                    payload["notFound"] = json!([]);
+                }
                 json!([c[0], payload, c[2]])
             })
             .collect();
@@ -212,7 +217,7 @@ async fn compose_pins_the_reviewed_default_when_identity_order_changes() {
                     identities.reverse();
                 }
                 ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
-                    "Identity/get", {"list":identities}, "i0"
+                    "Identity/get", {"accountId":"acct1","state":"state","notFound":[],"list":identities}, "i0"
                 ]]}))
             })
             .with_priority(1)
@@ -286,7 +291,7 @@ async fn compose_confirmation_rejects_changed_identity_fields() {
                     identity[changed_key] = json!("other@example.com");
                 }
                 ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
-                    "Identity/get", {"list":[identity]}, "i0"
+                    "Identity/get", {"accountId":"acct1","state":"state","notFound":[],"list":[identity]}, "i0"
                 ]]}))
             })
             .with_priority(1)
@@ -334,7 +339,7 @@ async fn compose_drafts_retain_failed_identity_resolution_without_retrying() {
                 let server = compose_server().await;
                 Mock::given(wiremock::matchers::body_string_contains("Identity/get"))
                     .respond_with(ResponseTemplate::new(status).set_body_json(json!({
-                        "methodResponses":[["Identity/get", {"list":[]}, "i0"]]
+                        "methodResponses":[["Identity/get", {"accountId":"acct1","state":"state","notFound":[],"list":[]}, "i0"]]
                     })))
                     .with_priority(1)
                     .expect(2)

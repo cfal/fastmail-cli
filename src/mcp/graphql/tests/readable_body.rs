@@ -66,7 +66,7 @@ async fn readable_bodies_are_lazy_batched_and_preserve_raw_graphql_fields() {
                 })
                 .collect();
             ResponseTemplate::new(200)
-                .set_body_json(json!({"methodResponses":[["Email/get",{"list":list},call[2]]]}))
+                .set_body_json(json!({"methodResponses":[["Email/get",{"accountId":"acct1","state":"state","notFound":[],"list":list},call[2]]]}))
         })
         .with_priority(1)
         .expect(1)
@@ -172,7 +172,7 @@ async fn readable_body_null_and_conversion_failures_do_not_replace_raw_bodies() 
                     json!({"id":id,"htmlBody":[{"partId":"1","type":"text/html"}],"bodyValues":{"1":{"value":"%PDF-private"}}})
                 }
             }).collect();
-            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Email/get",{"list":list},call[2]]]}))
+            ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[["Email/get",{"accountId":"acct1","state":"state","notFound":[],"list":list},call[2]]]}))
         }).expect(1).mount(&server).await;
     let response = run(
         &server,
