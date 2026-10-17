@@ -388,6 +388,7 @@ impl CardDavClient {
 
     async fn find_contact_href(&self, contact_id: &str) -> Result<Option<ContactResource>> {
         let addressbooks = self.list_addressbooks().await?;
+        let mut found = None;
 
         for ab in addressbooks {
             let response = self.query_addressbook(&ab.href).await?;
@@ -396,7 +397,10 @@ impl CardDavClient {
             let text = read_response(response).await?;
 
             if !status.is_success() {
-                continue;
+                return Err(Error::Server(format!(
+                    "CardDAV REPORT failed: {} - {}",
+                    status, text
+                )));
             }
 
             let doc = roxmltree::Document::parse(&text)
@@ -420,6 +424,12 @@ impl CardDavClient {
                         .contact_at(vcard_data, href)
                         .is_some_and(|c| c.id == contact_id)
                 {
+                    if found.is_some() {
+                        return Err(Error::Server(
+                            "Contact ID matches multiple resources; refusing an ambiguous mutation"
+                                .into(),
+                        ));
+                    }
                     let etag = dav_property(response, dav_ns, "getetag")
                         .map(str::trim)
                         .filter(|value| value.starts_with('"') && value.ends_with('"'))
@@ -429,16 +439,16 @@ impl CardDavClient {
                                     .into(),
                             )
                         })?;
-                    return Ok(Some(ContactResource {
+                    found = Some(ContactResource {
                         href: href.into(),
                         vcard: vcard_data.into(),
                         etag: etag.into(),
-                    }));
+                    });
                 }
             }
         }
 
-        Ok(None)
+        Ok(found)
     }
 
     /// Create a new contact. Returns the created Contact.
@@ -881,33 +891,9 @@ fn update_vcard(existing: &str, fields: &ContactFields<'_>) -> Result<String> {
     Ok(result)
 }
 
-/// Generate a UUID-like UID for new contacts
+/// Generate a UID for new contacts.
 fn generate_uid() -> String {
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    // Mix timestamp nanos with a counter for uniqueness
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    now.as_nanos().hash(&mut hasher);
-    count.hash(&mut hasher);
-    let hi = hasher.finish();
-    // Second hash with different seed for lower bits
-    now.as_nanos()
-        .wrapping_mul(6364136223846793005)
-        .hash(&mut hasher);
-    let lo = hasher.finish();
-    format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        (hi >> 32) as u32,
-        (hi >> 16) as u16,
-        hi as u16,
-        (lo >> 48) as u16,
-        lo & 0xFFFF_FFFF_FFFF
-    )
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Build a vCard 3.0 string from contact fields

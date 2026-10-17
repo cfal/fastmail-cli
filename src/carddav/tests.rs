@@ -259,6 +259,58 @@ async fn contact_server(vcard: &str, etag: &str) -> (CardDavClient, wiremock::Mo
 }
 
 #[tokio::test]
+async fn ambiguous_or_incomplete_contact_discovery_never_writes() {
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path},
+    };
+    for status in [207, 401, 429, 503] {
+        let (client, server) =
+            contact_server("BEGIN:VCARD\nUID:contact\nFN:Name\nEND:VCARD\n", "\"v1\"").await;
+        Mock::given(method("PROPFIND")).respond_with(ResponseTemplate::new(207).set_body_string(
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/books/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response><d:response><d:href>/other/</d:href><d:propstat><d:prop><d:resourcetype><c:addressbook/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#
+        )).with_priority(1).mount(&server).await;
+        let body = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/other/copy.vcf</d:href><d:propstat><d:prop><d:getetag>"v2"</d:getetag><c:address-data>BEGIN:VCARD
+UID:contact
+FN:Copy
+END:VCARD
+</c:address-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+        Mock::given(method("REPORT"))
+            .and(path("/other/"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let fields = ContactFields {
+            title: Some("Changed"),
+            ..Default::default()
+        };
+        for error in [
+            client.update_contact("contact", &fields).await.unwrap_err(),
+            client.delete_contact("contact").await.unwrap_err(),
+        ] {
+            let message = error.to_string();
+            assert!(
+                message.contains(if status == 207 {
+                    "multiple resources"
+                } else {
+                    "REPORT failed"
+                }),
+                "{message}"
+            );
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method != "PUT" && request.method != "DELETE")
+        );
+    }
+}
+
+#[tokio::test]
 async fn contact_mutations_use_successful_properties_and_trim_etags() {
     use wiremock::{
         Mock, ResponseTemplate,
@@ -556,6 +608,7 @@ fn test_generate_uid_unique() {
     let uid1 = generate_uid();
     let uid2 = generate_uid();
     assert_ne!(uid1, uid2);
+    assert_eq!(uuid::Uuid::parse_str(&uid1).unwrap().get_version_num(), 4);
     // Should look UUID-ish
     assert_eq!(uid1.matches('-').count(), 4);
 }
