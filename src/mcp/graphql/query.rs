@@ -1,5 +1,6 @@
 //! GraphQL query resolvers
 
+use super::attachment_cursor::attachment_connection;
 use async_graphql::{Context, Object, Result};
 
 use super::connection::{
@@ -236,7 +237,7 @@ impl QueryRoot {
         last: Option<i32>,
     ) -> Result<ListConnection<GqlAttachment>> {
         let email = require_email(ctx, &email_id).await?;
-        paginate(
+        attachment_connection(
             attachments_of(&email),
             PageArgs {
                 after,
@@ -244,11 +245,10 @@ impl QueryRoot {
                 first,
                 last,
             },
-            |a| a.blob_id.clone(),
         )
     }
 
-    /// Get a single attachment by blob ID. Select `content` to fetch its data.
+    /// Get a single attachment by blob ID. Select `base64`, `image` or `text` to fetch its data.
     async fn attachment(
         &self,
         ctx: &Context<'_>,

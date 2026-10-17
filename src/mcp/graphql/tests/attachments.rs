@@ -1,6 +1,75 @@
 use super::*;
 
 #[tokio::test]
+async fn repeated_blobs_have_unique_occurrence_cursors_and_legacy_ambiguity_is_explicit() {
+    use std::collections::HashSet;
+    use wiremock::matchers::body_string_contains;
+    let server = mock_server(1).await;
+    Mock::given(body_string_contains("Email/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"methodResponses":[[
+            "Email/get", {"accountId":"acct1","state":"s1","notFound":[],"list":[{"id":"e0","attachments":[
+                {"blobId":"same","partId":"part1","name":"one"},
+                {"blobId":"same","partId":"part2","name":"two"},
+                {"blobId":"same","name":"three"},
+                {"blobId":"unique","name":"four"},
+                {"blobId":"same","name":"five"}
+            ]}]}, "g0"
+        ]]}))).with_priority(1).mount(&server).await;
+    for nested in [false, true] {
+        let query = |args: &str| {
+            let field = if nested {
+                format!("attachments({args})")
+            } else {
+                format!("attachments(emailId:\"e0\", {args})")
+            };
+            let selection = format!(
+                "{field} {{ edges {{ cursor node {{ name }} }} pageInfo {{ hasNextPage hasPreviousPage }} }}"
+            );
+            if nested {
+                format!("{{ email(id:\"e0\") {{ {selection} }} }}")
+            } else {
+                format!("{{ {selection} }}")
+            }
+        };
+        let mut after = Value::Null;
+        let mut cursors = Vec::new();
+        for (index, expected) in ["one", "two", "three", "four", "five"]
+            .into_iter()
+            .enumerate()
+        {
+            let response = run(&server, &query(&format!("first:1,after:{after}"))).await;
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let data = response.data.into_json().unwrap();
+            let data = if nested { &data["email"] } else { &data };
+            let page = &data["attachments"];
+            assert_eq!(page["edges"].as_array().unwrap().len(), 1);
+            assert_eq!(page["edges"][0]["node"]["name"], expected);
+            assert_eq!(page["pageInfo"]["hasNextPage"], index < 4);
+            after = page["edges"][0]["cursor"].clone();
+            cursors.push(after.as_str().unwrap().to_owned());
+        }
+        assert_eq!(cursors.iter().collect::<HashSet<_>>().len(), 5);
+        let response = run(&server, &query("first:1, after:\"same\"")).await;
+        assert_eq!(
+            response.errors[0].message,
+            "Ambiguous legacy attachment cursor. Restart pagination to obtain per-part cursors."
+        );
+        for (arguments, expected) in [
+            ("first:1, after:\"unique\"".to_owned(), "five"),
+            (format!("last:1, before:{}", json!(cursors[3])), "three"),
+            ("last:1, before:\"unique\"".to_owned(), "three"),
+        ] {
+            let response = run(&server, &query(&arguments)).await;
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let data = response.data.into_json().unwrap();
+            let data = if nested { &data["email"] } else { &data };
+            assert_eq!(data["attachments"]["edges"][0]["node"]["name"], expected);
+        }
+    }
+    assert!(downloads(&server).await.is_empty());
+}
+
+#[tokio::test]
 async fn attachment_lists_skip_parts_without_blob_ids_and_missing_blob_is_null() {
     use wiremock::matchers::body_string_contains;
     let server = mock_server(1).await;

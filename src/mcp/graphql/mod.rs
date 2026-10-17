@@ -5,6 +5,7 @@
 
 use async_graphql::Schema;
 
+mod attachment_cursor;
 mod attachments;
 mod drafts;
 

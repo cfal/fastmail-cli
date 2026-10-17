@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use super::attachment_cursor::attachment_connection;
 use async_graphql::{Context, Enum, Object, Result, SimpleObject};
 
 use super::connection::{
@@ -532,9 +533,8 @@ impl GqlEmail {
         .map_err(|_| async_graphql::Error::new("Readable body conversion failed"))
     }
 
-    /// Attachments with metadata. Lazily fetched. Select `content` on an
-    /// attachment to also download its data (images are base64-encoded,
-    /// documents have text extracted).
+    /// Attachments with metadata and per-part cursors. Lazily fetched. Select
+    /// `base64`, `image` or `text` to download and process an attachment's data.
     #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn attachments(
         &self,
@@ -556,7 +556,7 @@ impl GqlEmail {
         } else {
             attachments_of(self.detail(ctx).await?.as_ref())
         };
-        paginate(attachments, args, |a| a.blob_id.clone())
+        attachment_connection(attachments, args)
     }
 
     /// Mailbox IDs this email belongs to
@@ -593,7 +593,7 @@ impl GqlEmail {
 
 /// Attachment with metadata and lazy content resolution.
 /// Query just metadata fields (blobId, name, size, etc.) for listings,
-/// or include `content` to download and process the attachment data.
+/// or include `base64`, `image` or `text` to download and process the data.
 pub struct GqlAttachment {
     pub blob_id: String,
     pub name: Option<String>,

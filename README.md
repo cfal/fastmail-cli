@@ -872,7 +872,10 @@ Mailbox ──emails──▶ Email ──attachments──▶ Attachment ──
 Every collection is a Relay connection — `mailboxes`, `identities`,
 `maskedEmails`, `contacts`, `attachments`, `Mailbox.children`, `Thread.emails` —
 so each takes `first` / `last` / `after` / `before` and exposes `totalCount`,
-`pageInfo`, `edges` and `nodes`. Cursors are IDs. Use `nodes` for the items;
+`pageInfo`, `edges` and `nodes`. Most cursors are IDs. Attachment cursors identify
+individual MIME-part occurrences, so repeated blob IDs still paginate correctly.
+Unambiguous older blob-ID cursors remain accepted; ambiguous ones require a
+restart. Treat emitted attachment cursors as opaque. Use `nodes` for the items;
 `edges` only when you want per-item cursors. Default page 25, max 100 — check
 `pageInfo.hasNextPage` rather than assuming you got the lot.
 

@@ -58,6 +58,19 @@ async fn schema_prose_names_no_removed_construct() {
             "content {",
             "`Attachment.content` split into base64/image/text",
         ),
+        ("Attachment.content", "use base64/image/text"),
+        (
+            "Select `content`",
+            "use base64/image/text for attachment payloads",
+        ),
+        (
+            "select `content`",
+            "use base64/image/text for attachment payloads",
+        ),
+        (
+            "include `content`",
+            "use base64/image/text for attachment payloads",
+        ),
         ("textContent", "`AttachmentContent` is gone — use `text`"),
         (
             "base64Content",
