@@ -169,14 +169,19 @@ The v4.0.6 dependency refresh updates `rmcp` to 2.2.0, `rustls` to 0.23.46,
 `quinn-proto` to 0.11.19, and ZIP parsing to `zip` 9.0.5. `xberg` 1.3.10
 replaces the unmaintained `unsafe-libyaml` dependency with `yaml_serde` and
 `libyaml-rs`. MCP HTTP sessions retain the existing outer authentication,
-Host/Origin validation, and request-body limits; rmcp now removes abandoned
-sessions after its idle timeout rather than retaining them permanently.
+Host/Origin validation, and request-body limits. rmcp now validates sessionless
+initial POSTs before allocating a session, preventing rejected requests from
+leaking permanent session-table entries. Initialized idle sessions still expire
+after five minutes. The upstream OAuth/redirect advisories affect client/auth
+features that this binary does not compile.
 
 Published `calamine` 0.36.1 still requires vulnerable ZIP 8.6. To retain Excel
 support without a scanner exception, `[patch.crates-io]` pins its upstream
 [ZIP 9 migration](https://github.com/tafia/calamine/commit/c15fefe995e890da206b58542b4e45190f564f30)
-at commit `c15fefe995e890da206b58542b4e45190f564f30`. This is a temporary Git
-source dependency, not a local fork or vendored copy. Remove the patch once a
+at commit `c15fefe995e890da206b58542b4e45190f564f30`. This upstream revision
+includes v0.36.1 plus unreleased spreadsheet-reader changes, including the
+quick-xml 0.42 migration and ZIP 9 upgrade. It is a temporary Git source
+dependency, not a local fork or vendored copy. Remove the patch once a
 published version accepted by xberg includes this migration. Cargo.lock pins
 the commit and resolved dependencies; builds do not follow a moving branch.
 Cargo applies patches only from the workspace root. Downstream library users

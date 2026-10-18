@@ -44,13 +44,16 @@
 
 ## Dependency Security
 
-- Update rmcp to 2.2.0, fixing abandoned MCP HTTP session retention and upstream
-  OAuth/redirect issues. Library consumers embedding `FastmailMcp` must use
-  rmcp 2.x; CLI and HTTP interfaces remain unchanged.
+- Update rmcp to 2.2.0, preventing rejected sessionless initial POSTs from
+  leaking session-table entries. Initialized idle sessions still expire after
+  five minutes. Upstream OAuth/redirect advisories affect client/auth features
+  this binary does not compile. Library consumers embedding `FastmailMcp` must
+  use rmcp 2.x; CLI and HTTP interfaces remain unchanged.
 - Update rustls to 0.23.46 and quinn-proto to 0.11.19 for their security fixes.
   Upgrade xberg to 1.3.10, replacing its unmaintained YAML backend, and use ZIP
-  9.0.5 throughout. Spreadsheet support uses an exact upstream calamine commit
-  until its ZIP 9 migration is published.
+  9.0.5 throughout. Spreadsheet support temporarily pins upstream calamine
+  v0.36.1 plus unreleased reader changes, including quick-xml 0.42 and ZIP 9,
+  until a published version accepted by xberg includes the ZIP migration.
 - Retain only the existing, expiring `lru` and `paste` exceptions documented in
   SECURITY.md. No new advisory suppressions are added.
 

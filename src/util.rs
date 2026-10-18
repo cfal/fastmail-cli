@@ -98,6 +98,7 @@ pub async fn extract_text(bytes: &[u8], filename: &str) -> anyhow::Result<Option
     let config = ExtractionConfig {
         use_cache: false,
         disable_ocr: true,
+        strict_parse: true,
         extraction_timeout_secs: Some(60),
         ..Default::default()
     };
@@ -180,6 +181,7 @@ pub(crate) async fn extract_text_bounded(
     let config = ExtractionConfig {
         use_cache: false,
         disable_ocr: true,
+        strict_parse: true,
         // The owning blocking job retains its permit until extraction completes.
         // xberg's timeout can return while internal blocking work is still running.
         extraction_timeout_secs: None,
@@ -935,6 +937,40 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_extraction_rejects_csv_cell_limit_without_plain_text_fallback() {
+        let csv = "a,b\n".repeat(50_001);
+        let result = extract_text_bounded(csv.as_bytes(), "big.csv", MAX_ATTACHMENT_BYTES).await;
+        assert!(
+            matches!(
+                result.as_ref().err().and_then(|error| error.downcast_ref()),
+                Some(xberg::XbergError::Security { .. })
+            ),
+            "CSV cell limit must return a security error"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_structured_attachments_do_not_fall_back_to_plain_text() {
+        for (filename, bytes) in [
+            ("broken.json", b"{\"key\": ".as_slice()),
+            ("broken.yaml", b"key: [unterminated".as_slice()),
+        ] {
+            assert_eq!(
+                extract_text(bytes, filename).await.unwrap(),
+                None,
+                "{filename}"
+            );
+            assert_eq!(
+                extract_text_bounded(bytes, filename, MAX_ATTACHMENT_BYTES)
+                    .await
+                    .unwrap(),
+                None,
+                "{filename}"
+            );
+        }
     }
 
     #[tokio::test]

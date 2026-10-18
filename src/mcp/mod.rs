@@ -12,6 +12,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
+    transport::streamable_http_server::session::local::LocalSessionManager,
 };
 use tokio::sync::Mutex;
 
@@ -603,8 +604,22 @@ fn http_router(
     surfaces: HttpSurfaces,
     policy: http_security::HttpSecurity,
 ) -> anyhow::Result<axum::Router> {
+    http_router_with_sessions(
+        mcp,
+        surfaces,
+        policy,
+        Arc::new(LocalSessionManager::default()),
+    )
+}
+
+fn http_router_with_sessions(
+    mcp: FastmailMcp,
+    surfaces: HttpSurfaces,
+    policy: http_security::HttpSecurity,
+    sessions: Arc<LocalSessionManager>,
+) -> anyhow::Result<axum::Router> {
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        StreamableHttpServerConfig, StreamableHttpService,
     };
 
     // One outer policy protects MCP, GraphQL and the IDE consistently.
@@ -614,7 +629,7 @@ fn http_router(
             let template = mcp.clone();
             move || Ok(template.clone())
         },
-        Arc::new(LocalSessionManager::default()),
+        sessions,
         config,
     );
 

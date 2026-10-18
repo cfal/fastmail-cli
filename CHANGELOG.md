@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [4.0.6] - 2026-10-17
+## [4.0.6] - 2026-10-18
 
 ### Added
 
@@ -19,9 +19,11 @@
 ### Fixed
 
 - Update MCP, TLS/QUIC, YAML, and ZIP dependencies to address new security and
-  maintenance advisories. Temporarily pin calamine's upstream ZIP 9 migration
-  until it is published, retaining spreadsheet extraction without new scanner
-  exceptions. Cover MCP session expiry and compressed Office/YAML extraction.
+  maintenance advisories. Temporarily pin upstream calamine v0.36.1 plus
+  unreleased reader changes, including quick-xml 0.42 and ZIP 9, retaining
+  spreadsheet extraction without new scanner exceptions. Preserve strict
+  extraction failures and cover rejected MCP initialization, session expiry,
+  and compressed Office/YAML extraction.
 - Validate JMAP method, call ID, account and complete get results; require positive
   write evidence. Preserve accepted submissions when automatic Sent filing fails,
   and never retry uncertain writes.

@@ -253,6 +253,50 @@ async fn mcp_http_session_supports_tools_and_explicit_close() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn rejected_initial_mcp_posts_do_not_allocate_sessions() {
+    use serde_json::json;
+
+    let sessions = Arc::new(LocalSessionManager::default());
+    let policy =
+        http_security::HttpSecurity::new("127.0.0.1:8080".parse().unwrap(), None, vec![]).unwrap();
+    let router = http_router_with_sessions(
+        FastmailMcp::build(None),
+        HttpSurfaces {
+            graphql: false,
+            graphiql: false,
+            browser: false,
+        },
+        policy,
+        sessions.clone(),
+    )
+    .unwrap();
+
+    for (body, expected) in [
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {
+                    "protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"}
+                }
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut req = request("POST", "/mcp", Body::from(body.to_string()));
+        req.headers_mut()
+            .insert("mcp-protocol-version", "2025-06-18".parse().unwrap());
+        let response = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), expected, "{body}");
+        assert!(!response.headers().contains_key("mcp-session-id"));
+        assert!(sessions.sessions.read().await.is_empty(), "{body}");
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn abandoned_mcp_session_expires_without_a_client_delete() {
     use rmcp::transport::streamable_http_server::session::local::SessionConfig;
