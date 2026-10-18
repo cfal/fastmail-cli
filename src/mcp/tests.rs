@@ -272,20 +272,18 @@ async fn rejected_initial_mcp_posts_do_not_allocate_sessions() {
     )
     .unwrap();
 
+    let initialize = json!({
+        "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"}
+        }
+    });
     for (body, expected) in [
         (
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
             StatusCode::UNPROCESSABLE_ENTITY,
         ),
-        (
-            json!({
-                "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {
-                    "protocolVersion": "2025-11-25", "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1"}
-                }
-            }),
-            StatusCode::BAD_REQUEST,
-        ),
+        (initialize.clone(), StatusCode::BAD_REQUEST),
     ] {
         let mut req = request("POST", "/mcp", Body::from(body.to_string()));
         req.headers_mut()
@@ -295,6 +293,14 @@ async fn rejected_initial_mcp_posts_do_not_allocate_sessions() {
         assert!(!response.headers().contains_key("mcp-session-id"));
         assert!(sessions.sessions.read().await.is_empty(), "{body}");
     }
+
+    let response = router
+        .oneshot(request("POST", "/mcp", Body::from(initialize.to_string())))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().contains_key("mcp-session-id"));
+    assert_eq!(sessions.sessions.read().await.len(), 1);
 }
 
 #[tokio::test(start_paused = true)]
